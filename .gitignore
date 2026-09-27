@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+# 生成物
+*.pdf
+!tests/assets/**/*.pdf
+.DS_Store
+.claude/scheduled_tasks.lock
