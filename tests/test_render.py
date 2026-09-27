@@ -248,3 +248,178 @@ def test_pagebreak_directive(tmp_path):
     out = tmp_path / "pb.pdf"
     pages = _convert(src, "a4-38x35", out)
     assert pages == 2
+
+
+# --- 実原稿で見つかった不具合の回帰テスト ----------------------------------------------
+
+def _pdf_text(path: Path) -> str:
+    """PDF 全体のテキスト（空白・改行とノンブル等の数字を除去）。"""
+    import re
+    text = "".join(p.extract_text() or "" for p in PdfReader(str(path)).pages)
+    return re.sub(r"[\s\d]", "", text)
+
+
+def _kana(n: int) -> str:
+    return "".join("いろはにほへとちりぬるをわかよたれそつねならむ"[i % 23] for i in range(n))
+
+
+@pytest.mark.parametrize("preset", ["a4-38x35", "b5h-40x40"])
+def test_page_spanning_paragraph_not_lost(tmp_path, preset):
+    """短い段落 14 個の後でページをまたぐ長い段落の全文が PDF に出る（#1）。
+
+    旧版は split() の断片が runs=[] で、ReportLab が断片に wrap() を呼び直すと
+    行が作り直されて本文が丸ごと消えていた。"""
+    body = "始" + _kana(1500) + "終"
+    src = "\n\n".join([f"短い段落です。{_kana(5)}。" for _ in range(14)] + [body]) + "\n"
+    out = tmp_path / "span.pdf"
+    pages = _convert(src, preset, out)
+    assert pages >= 2
+    assert body in _pdf_text(out)
+
+
+def test_split_fragments_survive_rewrap():
+    """split() の断片は wrap() を呼び直しても（幅が変わっても）本文を失わない（#1）。"""
+    lay = layout.resolve("b5h-40x40")
+    text = _kana(400)
+    para = JParagraph([Run(text, size=lay.font_size)], lay.leading, base_size=lay.font_size)
+    para.wrap(lay.body_width, 1e9)
+    first, rest = para.split(lay.body_width, lay.leading * 4)
+
+    def joined(p):
+        return "".join(a.text for line in p._lines for a in line.atoms)
+
+    for w in (lay.body_width, lay.body_width * 0.7):
+        first.wrap(w, 1e9)
+        rest.wrap(w, 1e9)
+        assert joined(first) + joined(rest) == text
+    first.wrap(lay.body_width, 1e9)
+    assert len(first._lines) == 4 and not first._lines[-1].ragged  # 続く行は両端揃え
+
+
+def test_split_fragment_footnote_ids():
+    """分割後の後半にある脚注参照は後半の断片に属する（#8）。"""
+    lay = layout.resolve("b5h-40x40")
+    src = f"{_kana(100)}[^a]{_kana(300)}[^b]\n\n[^a]: 前半の注。\n[^b]: 後半の注。\n"
+    b = Builder(lay)
+    para = next(f for f in b.build(src) if isinstance(f, JParagraph))
+    assert para.footnote_ids == [0, 1]
+    para.wrap(lay.body_width, 1e9)
+    first, rest = para.split(lay.body_width, lay.leading * 4)
+    assert first.footnote_ids == [0]
+    assert rest.footnote_ids == [1]
+
+
+def _heavy_footnote_src(n_paras: int = 24) -> str:
+    paras, defs = [], []
+    k = 0
+    for i in range(n_paras):
+        refs = []
+        for _ in range(1 + i % 3):
+            k += 1
+            refs.append(f"[^{k}]")
+            defs.append(f"[^{k}]: 脚注{k}。" + _kana(40 + (k * 37) % 160))
+        cut = 60 + (i * 53) % 200
+        body = _kana(320 + (i * 71) % 300)
+        paras.append(body[:cut] + refs[0] + body[cut:] + "".join(refs[1:]) + "。")
+    return "# 見出し\n\n" + "\n\n".join(paras) + "\n\n" + "\n".join(defs) + "\n"
+
+
+@pytest.mark.parametrize("preset", ["a4-38x35", "b5h-40x40"])
+def test_footnotes_single_pass_no_overlap_no_overreserve(tmp_path, preset):
+    """脚注の多い文書で、各ページの予約＝必要高、脚注と本文が重ならない、警告なし（#2 #3）。"""
+    lay = layout.resolve(preset)
+    src = _heavy_footnote_src()
+    stats: dict = {}
+
+    def make():
+        b = Builder(lay)
+        return b.build(src), b
+
+    out = tmp_path / "fn.pdf"
+    pages = render_passes(str(out), make, lay, stats=stats)
+    assert pages >= 3
+    assert stats["passes"] == 1
+    assert stats["warnings"] == []
+    fn_pages = 0
+    for page, s in stats["pages"].items():
+        assert not s["overlap"], page
+        assert abs(s["reserve"] - s["required"]) <= lay.leading, page
+        if s["fn_top"] is not None:
+            fn_pages += 1
+            assert s["body_bottom"] >= s["fn_top"], page
+    assert fn_pages >= 3
+    n_fn = src.count("\n[^")
+    assert _pdf_text(out).count("脚注。") == n_fn  # 全脚注が 1 回ずつ出力されている
+
+
+def test_footnotes_in_list_and_blockquote_are_drawn(tmp_path):
+    """箇条書き・引用の中の脚注参照も脚注として配置される。"""
+    src = ("- 項目[^a]です。\n\n> 引用[^b]です。\n\n"
+           "[^a]: りすとのちゅう。\n[^b]: いんようのちゅう。\n")
+    out = tmp_path / "nested.pdf"
+    _convert(src, "a4-38x35", out)
+    text = _pdf_text(out)
+    assert "りすとのちゅう。" in text
+    assert "いんようのちゅう。" in text
+
+
+def test_long_url_wraps_within_line():
+    """行幅を超える URL は区切り文字の後で折り返し、ハイフンを足さない（#5）。"""
+    lay = layout.resolve("b5h-40x40")
+    url = ("https://docs.example.com/product/latest/developerguide/"
+           "managed-rule-groups-use-case-and-something-very-very-long.html")
+    b = Builder(lay)
+    b.build(f"本文[^1]。\n\n[^1]: 脚注A {url}\n")
+    fn = b.styles.footnote
+    para = JParagraph(b.footnotes[0][1], fn.leading, base_size=fn.size)
+    para.wrap(lay.body_width, 1e9)
+    assert len(para._lines) >= 2
+    assert all(line.width <= lay.body_width + 0.2 for line in para._lines)
+    joined = "".join(a.text for line in para._lines for a in line.atoms)
+    assert joined == f"脚注A {url}"
+
+
+def test_long_word_without_break_chars_split_per_char():
+    lay = layout.resolve("b5h-40x40")
+    word = "x" * 300
+    para = JParagraph([Run(word, size=lay.font_size)], lay.leading, base_size=lay.font_size)
+    para.wrap(lay.body_width, 1e9)
+    assert all(line.width <= lay.body_width + 0.2 for line in para._lines)
+    assert "".join(a.text for line in para._lines for a in line.atoms) == word
+
+
+def test_consecutive_footnote_refs_are_separated():
+    """[^1][^2] は上付きの「1,2」になり「12」と読めない（#6）。"""
+    lay = layout.resolve("a4-38x35")
+    para = next(f for f in Builder(lay).build("本文です[^1][^2]。\n\n[^1]: A\n[^2]: B\n")
+                if isinstance(f, JParagraph))
+    sup = "".join(r.text for r in para.runs if r.sup)
+    assert sup == "1,2"
+
+
+def test_cli_merge_missing_input_fails(tmp_path):
+    """--merge で入力が見つからなければ変換せず終了コード 1（#4）。"""
+    from md2pdf.cli import main
+    ok = tmp_path / "ok.md"
+    ok.write_text("# A\n\n本文。\n", encoding="utf-8")
+    out = tmp_path / "x.pdf"
+    assert main(["--merge", "-o", str(out), str(tmp_path / "nope.md")]) == 1
+    assert main(["--merge", "-o", str(out), str(tmp_path / "nope.md"), str(ok)]) == 1
+    assert not out.exists()
+    assert main(["--merge", "-o", str(out), str(ok)]) == 0
+    assert out.exists()
+
+
+def test_cli_output_without_merge(tmp_path):
+    """--merge なしの -o: 入力 1 件ならそこへ出力、複数ならエラー（#7）。"""
+    from md2pdf.cli import main
+    a = tmp_path / "a.md"
+    b = tmp_path / "b.md"
+    for p in (a, b):
+        p.write_text("本文。\n", encoding="utf-8")
+    out = tmp_path / "sub.pdf"
+    assert main(["-o", str(out), str(a)]) == 0
+    assert out.exists() and not a.with_suffix(".pdf").exists()
+    with pytest.raises(SystemExit) as e:
+        main(["-o", str(out), str(a), str(b)])
+    assert e.value.code == 2

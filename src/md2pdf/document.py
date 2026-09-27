@@ -1,17 +1,20 @@
 """PDF ドキュメント生成（ノンブル・脚注・しおり・メタデータ）。
 
 脚注は LaTeX 同様、参照のあるページの**本文ブロック下部**に別枠で配置し、その分だけ
-本文の行数をそのページで減らす（版面の外＝下マージンにはノンブルのみ）。脚注量に応じて
-本文フレーム高が変わりページ割りも変わるため、ページごとの脚注高を反復計算で収束させる。
+本文の行数をそのページで減らす（版面の外＝下マージンにはノンブルのみ）。本文フレームに
+Flowable を置く時点で、その Flowable が持ち込む脚注の高さを差し引いて入るかを判定する
+（`_FootnoteFrame`）。予約はそのページに実際に置かれた脚注だけから決まるため 1 パスで確定し、
+反復計算の振動や古い予約の残存は起こらない。
 フォントは同梱 Noto を埋め込むため、受け手環境に依存しない。
 """
 
 from __future__ import annotations
 
 import sys
+from copy import deepcopy
 from typing import Callable, Optional
 
-from reportlab.platypus import BaseDocTemplate, Frame, PageTemplate
+from reportlab.platypus import BaseDocTemplate, Flowable, Frame, PageTemplate
 from reportlab.platypus.doctemplate import ActionFlowable
 
 from . import config, fontreg
@@ -21,22 +24,127 @@ from .render.inline import ALIGN_LEFT, JParagraph, Run
 
 _SLACK = 2.0          # N 行ぴったりがフロート誤差で溢れて split 無限ループするのを防ぐ
 _MAX_RESERVE_RATIO = 0.5   # 脚注が本文ブロックを占有してよい最大割合
+_MAX_SINGLE_RATIO = 0.85   # 単独で上限を超える脚注 1 件に許す最大割合（超えると重なる）
+_SPLIT_TRIES = 8           # 分割前半の脚注に合わせて予約を増やしながら分割し直す上限
+
+
+def _footnote_ids(f) -> list[int]:
+    """Flowable（入れ子を含む）に含まれる脚注参照 id を出現順・重複なしで返す。
+
+    JParagraph は断片ごとに自分のアトムから id を求める。ListItem/Heading（.para）、
+    引用（.children）、KeepTogether（._content）、表（._cellvalues）は中身を辿る。
+    """
+    ids: list[int] = []
+
+    def add(src) -> None:
+        for i in src:
+            if i not in ids:
+                ids.append(i)
+
+    own = getattr(f, "footnote_ids", None)
+    if own:
+        add(own)
+    para = getattr(f, "para", None)
+    if para is not None:
+        add(_footnote_ids(para))
+    for attr in ("children", "_content"):
+        for ch in getattr(f, attr, None) or []:
+            if isinstance(ch, Flowable):
+                add(_footnote_ids(ch))
+    for row in getattr(f, "_cellvalues", None) or []:
+        for cell in row:
+            for c in (cell if isinstance(cell, (list, tuple)) else [cell]):
+                if isinstance(c, Flowable):
+                    add(_footnote_ids(c))
+    return ids
+
+
+class _FootnoteFrame(Frame):
+    """脚注の高さを差し引いて本文を置く本文フレーム（LaTeX 型）。
+
+    フレーム下端（= 脚注帯の上端）を `set_reserve()` で動かす。上端 `_y2` は不変なので、
+    すでに置いた本文の位置は変わらない。
+    """
+
+    def __init__(self, doc: "MdDocTemplate", x: float, y: float, w: float, h: float):
+        Frame.__init__(self, x, y, w, h, id="body", leftPadding=0, rightPadding=0,
+                       topPadding=0, bottomPadding=0)
+        self._doc = doc
+        self.reserve = 0.0
+
+    def __deepcopy__(self, memo):
+        # ReportLab の _listWrapOn（KeepTogether 等）は現フレームを deepcopy する。
+        # 文書テンプレートは複製できない（モジュール参照を持つ）ので共有させる。
+        memo[id(self._doc)] = self._doc
+        new = self.__class__.__new__(self.__class__)
+        memo[id(self)] = new
+        for k, v in self.__dict__.items():
+            new.__dict__[k] = deepcopy(v, memo)
+        return new
+
+    def set_reserve(self, r: float) -> None:
+        d = self._doc
+        self.reserve = r
+        self.__dict__["_y1"] = d._base_y + r
+        self.__dict__["_height"] = d._base_h - r
+        self._geom()   # _y2 は不変、_y1p と利用可能高 _aH を再計算
+
+    def _new_ids(self, flowable) -> list[int]:
+        pending = self._doc._pending_ids()
+        fns = self._doc.builder.footnotes
+        return [i for i in _footnote_ids(flowable)
+                if i not in pending and fns.get(i) is not None]
+
+    def add(self, flowable, canv, trySplit=0):
+        new = self._new_ids(flowable)
+        old = self.reserve
+        if new:
+            self.set_reserve(max(old, self._doc._reserve_for(new)))
+        ok = Frame.add(self, flowable, canv, trySplit)
+        if ok:
+            self._doc._body_bottom = self._y + flowable.getSpaceAfter()
+        elif new:
+            self.set_reserve(old)
+        return ok
+
+    def split(self, flowable, canv):
+        new = self._new_ids(flowable)
+        if not new:
+            return Frame.split(self, flowable, canv)
+        # 前半の断片が持ち込む脚注の分だけ予約を増やして分割し直す。予約は単調増加かつ
+        # 上限付きなので必ず止まる。続く add(S[0]) が同じ予約を張り直すので、ここでは戻す。
+        old = r = self.reserve
+        try:
+            for _ in range(_SPLIT_TRIES):
+                self.set_reserve(r)
+                S = Frame.split(self, flowable, canv)
+                if not S:
+                    return S
+                head = [i for i in _footnote_ids(S[0]) if i in new]
+                need = max(old, self._doc._reserve_for(head)) if head else old
+                if need <= r + 1e-6:
+                    return S
+                r = need
+            return []
+        finally:
+            self.set_reserve(old)
 
 
 class MdDocTemplate(BaseDocTemplate):
     def __init__(self, filename: str, layout: Layout, builder: Builder,
-                 show_page_number: bool = True, title: str = "", author: str = "",
-                 reserve: Optional[dict[int, float]] = None) -> None:
+                 show_page_number: bool = True, title: str = "",
+                 author: str = "") -> None:
         x, y, w, h = layout.frame
         page_w, page_h = layout.page_size
         self.layout = layout
         self.builder = builder
         self.show_page_number = show_page_number
-        self._reserve = reserve or {}          # 前パスで決めた各ページの脚注高
-        self._fn_pages: dict[int, list[int]] = {}  # このパスでの「ページ→脚注 id」
-        self._page_fn_ids: list[int] = []
-        self._carry_fn: list[int] = []
-        self._fn_overflow = False
+        self._page_fn_ids: list[int] = []      # このページで参照された脚注 id
+        self._carry_fn: list[int] = []         # 前ページから繰り越した脚注 id
+        self._fn_cache: dict[int, tuple[JParagraph, float]] = {}
+        self._fn_oversize: list[int] = []      # 単独で上限を超えた脚注の表示番号
+        self._body_bottom: Optional[float] = None
+        self.page_stats: dict[int, dict] = {}  # 検証用: ページごとの予約・必要高・重なり
         self._base_y = y - _SLACK
         self._base_h = h + _SLACK
         self._last_src_file: Optional[str] = None   # 直近まで処理できた入力ファイル（診断用）
@@ -48,21 +156,66 @@ class MdDocTemplate(BaseDocTemplate):
             topMargin=page_h - (y + h), bottomMargin=y,
             title=title or None, author=author or None,
         )
-        self._frame = Frame(x, self._base_y, w, self._base_h, id="body",
-                            leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+        self._frame = _FootnoteFrame(self, x, self._base_y, w, self._base_h)
         self.addPageTemplates([
             PageTemplate(id="main", frames=[self._frame],
                          onPage=self._page_begin, onPageEnd=self._page_end)
         ])
 
-    # --- フレームの脚注予約（ページ開始時に本文フレーム高を縮める） ------------------
+    # --- 脚注帯の寸法（予約と描画で同じ計算を使う） ------------------------------------
+    def _footnote_para(self, fid: int) -> tuple[JParagraph, float]:
+        hit = self._fn_cache.get(fid)
+        if hit is not None:
+            return hit
+        fn = self.builder.styles.footnote
+        num, runs = self.builder.footnotes[fid]
+        para_runs = [Run(f"{num} ", fn.font, fn.size, config.COLOR_QUOTE_TEXT)]
+        para_runs.extend(runs or [Run("", fn.font, fn.size, config.COLOR_TEXT)])
+        para = JParagraph(para_runs, fn.leading, align=ALIGN_LEFT, base_size=fn.size)
+        para.wrap(self.layout.frame[2], 1e9)
+        hit = (para, len(para._lines) * fn.leading)
+        self._fn_cache[fid] = hit
+        return hit
+
+    def _band(self, ids: list[int]):
+        """脚注 ids を帯に並べたときの (載せる [(para, ph)], 繰り越す ids, 帯の高さ)。
+
+        帯の高さ = 区切り罫と上下の余白 + 各脚注の高さ + 脚注間の空き。上限
+        （本文ブロックの _MAX_RESERVE_RATIO）を超える分は次ページへ繰り越す。先頭の 1 件が
+        単独で上限を超える場合だけは、_MAX_SINGLE_RATIO まで載せる。
+        """
+        fn = self.builder.styles.footnote
+        gap = fn.size * 0.25
+        cap = self._base_h * _MAX_RESERVE_RATIO
+        taken: list[tuple[JParagraph, float]] = []
+        height = fn.size * 0.9
+        for idx, fid in enumerate(ids):
+            para, ph = self._footnote_para(fid)
+            add = ph + (gap if taken else 0.0)
+            if height + add > cap and taken:
+                return taken, ids[idx:], height
+            taken.append((para, ph))
+            height += add
+        if not taken:
+            return [], [], 0.0
+        return taken, [], min(height, self._base_h * _MAX_SINGLE_RATIO)
+
+    def _reserve_for(self, new_ids: list[int]) -> float:
+        """このページの既存の脚注に new_ids を加えたときに必要な予約高。"""
+        return self._band(self._pending_ids() + new_ids)[2]
+
+    def _pending_ids(self) -> list[int]:
+        ids = list(self._carry_fn)
+        for fid in self._page_fn_ids:
+            if fid not in ids:
+                ids.append(fid)
+        return [i for i in ids if self.builder.footnotes.get(i) is not None]
+
+    # --- ページ開始: 繰越し脚注の分を最初から予約する ----------------------------------
     def _page_begin(self, canvas, doc) -> None:
-        r = self._reserve.get(canvas.getPageNumber(), 0.0)
-        fr = self._frame
-        fr._y1 = self._base_y + r
-        fr._height = self._base_h - r
-        fr._geom()    # _y2 と利用可能高 _aH を再計算（_reset だけでは反映されない）
-        fr._reset()
+        self._page_fn_ids = []
+        self._body_bottom = None
+        self._frame.set_reserve(self._band(self._pending_ids())[2])
 
     def afterFlowable(self, flowable) -> None:
         src = getattr(flowable, "_src_file", None)
@@ -72,24 +225,32 @@ class MdDocTemplate(BaseDocTemplate):
         self._last_flowable_desc = (
             f"画像 {image_path}" if image_path else type(flowable).__name__
         )
-        ids = getattr(flowable, "footnote_ids", None)
-        if ids:
-            self._page_fn_ids.extend(ids)
-            page = self.canv.getPageNumber()
-            self._fn_pages.setdefault(page, []).extend(ids)
+        for fid in _footnote_ids(flowable):
+            if fid not in self._page_fn_ids:
+                self._page_fn_ids.append(fid)
 
     # --- ページ終了時に脚注とノンブルを描画 ------------------------------------------
     def _page_end(self, canvas, doc) -> None:
         page = canvas.getPageNumber()
-        r = self._reserve.get(page, 0.0)
-        self._carry_fn = self._draw_footnotes(canvas, self._pending_ids(), r, draw=True)
-        self._draw_page_number(canvas)
+        taken, leftover, height = self._band(self._pending_ids())
+        reserve = self._frame.reserve
+        fn_top = self._draw_footnotes(canvas, taken) if taken else None
+        body = self._body_bottom
+        self.page_stats[page] = {
+            "reserve": reserve,
+            "required": height,
+            "body_bottom": body,
+            "fn_top": fn_top,
+            "overlap": bool(fn_top is not None and body is not None
+                            and body < fn_top - 0.01),
+            "carried": len(leftover),
+        }
+        self._carry_fn = leftover
         self._page_fn_ids = []
+        self._draw_page_number(canvas)
 
     def _has_overflow_pending(self) -> bool:
-        page = self.canv.getPageNumber()
-        r = self._reserve.get(page, 0.0)
-        return bool(self._draw_footnotes(None, self._pending_ids(), r, draw=False))
+        return bool(self._band(self._pending_ids())[1])
 
     def _nombre_baseline(self) -> float:
         return max(14.0, self.layout.frame[1] * 0.45)
@@ -104,93 +265,28 @@ class MdDocTemplate(BaseDocTemplate):
         canvas.drawCentredString(page_w / 2.0, self._nombre_baseline(),
                                  str(canvas.getPageNumber()))
 
-    def _pending_ids(self) -> list[int]:
-        ids = list(self._carry_fn)
-        for fid in self._page_fn_ids:
-            if fid not in ids:
-                ids.append(fid)
-        return [i for i in ids if self.builder.footnotes.get(i) is not None]
-
-    def _footnote_para(self, fid: int, width: float) -> JParagraph:
-        fn = self.builder.styles.footnote
-        num, runs = self.builder.footnotes[fid]
-        para_runs = [Run(f"{num} ", fn.font, fn.size, config.COLOR_QUOTE_TEXT)]
-        para_runs.extend(runs or [Run("", fn.font, fn.size, config.COLOR_TEXT)])
-        para = JParagraph(para_runs, fn.leading, align=ALIGN_LEFT, base_size=fn.size)
-        para.wrap(width, 1e9)
-        return para
-
-    def _draw_footnotes(self, canvas, ids: list[int], reserve: float,
-                        draw: bool = True) -> list[int]:
-        """脚注を予約帯（本文ブロック下部〜ノンブル直上）へ下詰めで配置し、溢れた id を返す。
-
-        予約に余りがある（過予約の）場合は下詰めにすることで、上に自然な余白が出るだけで
-        クリップしない。帯に収まらない分は次ページへ繰り越す。
-        """
-        if not ids:
-            return []
+    def _draw_footnotes(self, canvas, taken: list[tuple[JParagraph, float]]) -> float:
+        """脚注を帯（本文ブロック下部〜ノンブル直上）に下詰めで描き、区切り罫の y を返す。"""
         x, _, w, _ = self.layout.frame
         fn = self.builder.styles.footnote
-        band_top = self._base_y + reserve
-        floor = self._base_y + fn.size * 0.2          # ノンブルは更に下
         gap = fn.size * 0.25
-        avail = band_top - floor
-        if avail <= 0:
-            # reserve が未確定（収束前の初回パス、または前パスに存在しなかった繰越し
-            # 専用ページ）だと avail が 0 以下になり、1 ページ 1 件しか捌けなくなる。
-            # 脚注が多い文書（特に複数ファイル結合）では繰越しが 10 ページ超に及び、
-            # ReportLab の「10 ページ連続で内容なし」ガードに引っかかって全体が失敗
-            # する。上限（_MAX_RESERVE_RATIO）までは受け入れて複数件ずつ捌けるように
-            # する。実際にどこまで表示するかは次パスの required_reserve() が決める。
-            avail = self._base_h * _MAX_RESERVE_RATIO - fn.size * 0.2
-
-        taken: list = []          # (para, ph)
-        total = 0.0
-        leftover: list[int] = []
-        for idx, fid in enumerate(ids):
-            para = self._footnote_para(fid, w)
-            ph = len(para._lines) * fn.leading
-            add = ph + (gap if taken else 0.0)
-            if total + add > avail:
-                if taken:
-                    leftover = ids[idx:]              # 次ページへ繰り越し
-                    break
-                self._fn_overflow = True              # 単独で帯を超える（収束で通常は解消）
-            taken.append((para, ph))
-            total += add
-
-        if draw and taken:
-            block_h = sum(ph for _, ph in taken) + gap * (len(taken) - 1)
-            top = floor + min(block_h, avail)          # 下詰め（ブロック下端＝floor）
-            canvas.setStrokeColor(config.COLOR_FOOTNOTE_RULE)
-            canvas.setLineWidth(0.5)
-            canvas.line(x, top + fn.size * 0.35, x + w * 0.35, top + fn.size * 0.35)
-            y = top
-            for para, ph in taken:
-                para.canv = canvas
-                para.drawOn(canvas, x, y - ph)
-                y -= ph + gap
-        return leftover
-
-    # --- 反復計算用: このパスで判明した「ページ→必要脚注高」 -------------------------
-    def required_reserve(self) -> dict[int, float]:
-        fn = self.builder.styles.footnote
-        x, _, w, _ = self.layout.frame
-        cap = self._base_h * _MAX_RESERVE_RATIO
-        res: dict[int, float] = {}
-        for page, ids in self._fn_pages.items():
-            seen: list[int] = []
-            for i in ids:
-                if i not in seen and self.builder.footnotes.get(i) is not None:
-                    seen.append(i)
-            if not seen:
-                continue
-            total = fn.size * 0.9                  # 区切り罫＋上下の余白
-            for fid in seen:
-                para = self._footnote_para(fid, w)
-                total += len(para._lines) * fn.leading + fn.size * 0.25
-            res[page] = min(total, cap)
-        return res
+        floor = self._base_y + fn.size * 0.2          # ノンブルは更に下
+        block_h = sum(ph for _, ph in taken) + gap * (len(taken) - 1)
+        if fn.size * 0.9 + block_h > self._base_h * _MAX_RESERVE_RATIO:
+            num = self.builder.footnotes[self._pending_ids()[0]][0]
+            if num not in self._fn_oversize:
+                self._fn_oversize.append(num)
+        top = floor + block_h
+        rule_y = top + fn.size * 0.35
+        canvas.setStrokeColor(config.COLOR_FOOTNOTE_RULE)
+        canvas.setLineWidth(0.5)
+        canvas.line(x, rule_y, x + w * 0.35, rule_y)
+        y = top
+        for para, ph in taken:
+            para.canv = canvas
+            para.drawOn(canvas, x, y - ph)
+            y -= ph + gap
+        return rule_y
 
 
 class _CondPageBreak(ActionFlowable):
@@ -207,52 +303,50 @@ class _CondPageBreak(ActionFlowable):
 
 def render_passes(filename: str, make_story: Callable[[], "tuple[list, Builder]"],
                   layout: Layout, show_page_number: bool = True, title: str = "",
-                  author: str = "") -> int:
-    """脚注の予約高を反復計算で収束させながら PDF 化し、総ページ数を返す。
+                  author: str = "", stats: Optional[dict] = None) -> int:
+    """PDF 化して総ページ数を返す。
 
-    make_story() は毎パス新しい (story, builder) を返すこと（Flowable の使い回しは不可）。
-    脚注が無ければ 1 パスで終わる。
+    脚注は本文を置く時点で予約するため 1 パスで確定する（make_story() は 1 回だけ呼ぶ。
+    名前と引数は従来の反復版との互換のため）。stats を渡すとページごとの予約・必要高・
+    重なりと警告を格納する（検証用）。
     """
     fontreg.register_fonts()
-    reserve: dict[int, float] = {}
-    doc = None
-    for _ in range(8):
-        story, builder = make_story()
-        doc = MdDocTemplate(filename, layout, builder, show_page_number, title,
-                            author, reserve=reserve)
-        flowables = list(story)
-        if builder.footnotes:
-            flowables += [_CondPageBreak(doc) for _ in range(len(builder.footnotes) + 1)]
-        try:
-            doc.build(flowables)
-        except Exception as e:  # noqa: BLE001
-            where = []
-            if doc._last_src_file:
-                where.append(f"入力ファイル: {doc._last_src_file}")
-            where.append(f"到達ページ: {doc.page}付近")
-            if doc._last_flowable_desc:
-                where.append(f"直前の要素: {doc._last_flowable_desc}")
-            raise RuntimeError(f"{e}（{', '.join(where)}）") from e
-        req = doc.required_reserve()
-        # 既存の予約で全ページの脚注が収まっていれば収束（クリップしない）
-        if all(v <= reserve.get(p, 0.0) + 1.0 for p, v in req.items()):
-            break
-        # 単調マージ（脚注のあるページのみ・予約は減らさない）→ 振動を止めて収束させる
-        reserve = {p: max(reserve.get(p, 0.0), v) for p, v in req.items()}
-    if doc is not None and doc._fn_overflow:
-        print(f"  警告: 単独で脚注領域を超える脚注があります: {filename}",
-              file=sys.stderr)
-    return doc.page if doc else 0
+    story, builder = make_story()
+    doc = MdDocTemplate(filename, layout, builder, show_page_number, title, author)
+    flowables = list(story)
+    if builder.footnotes:
+        flowables += [_CondPageBreak(doc) for _ in range(len(builder.footnotes) + 1)]
+    try:
+        doc.build(flowables)
+    except Exception as e:  # noqa: BLE001
+        where = []
+        if doc._last_src_file:
+            where.append(f"入力ファイル: {doc._last_src_file}")
+        where.append(f"到達ページ: {doc.page}付近")
+        if doc._last_flowable_desc:
+            where.append(f"直前の要素: {doc._last_flowable_desc}")
+        raise RuntimeError(f"{e}（{', '.join(where)}）") from e
+
+    warnings: list[str] = []
+    overlap = [p for p, s in doc.page_stats.items() if s["overlap"]]
+    if overlap:
+        warnings.append(f"脚注が本文に重なっているページがあります: {overlap}")
+    if doc._fn_oversize:
+        warnings.append(f"単独で脚注領域を超える脚注があります（脚注 {doc._fn_oversize}）")
+    if doc._carry_fn:
+        warnings.append(f"出力されなかった脚注があります: {len(doc._carry_fn)}件")
+    for w in warnings:
+        print(f"  警告: {w}: {filename}", file=sys.stderr)
+    if stats is not None:
+        stats["pages"] = doc.page_stats
+        stats["passes"] = 1
+        stats["warnings"] = warnings
+    return doc.page
 
 
 def render_to_pdf(filename: str, story: list, layout: Layout, builder: Builder,
                   show_page_number: bool = True, title: str = "",
                   author: str = "") -> int:
-    """単一の (story, builder) を用いる薄いラッパ。
-
-    脚注の反復収束には Flowable の作り直しが必要なため、内部では同じ story/builder を
-    返すファクトリを使う（脚注が無い場合や 1 パスで収束する場合に適切）。脚注を含み
-    厳密な収束が必要な場合は render_passes を直接使うこと。
-    """
+    """単一の (story, builder) を用いる薄いラッパ。"""
     return render_passes(filename, lambda: (story, builder), layout,
                          show_page_number, title, author)

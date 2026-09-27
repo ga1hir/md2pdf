@@ -39,6 +39,7 @@ class Run:
     ruby: Optional[str] = None          # このラン全体に振るルビ
     sup: bool = False                   # 上付き（脚注参照番号）
     image: Optional[tuple] = None       # インライン画像 (path, w_pt, h_pt) 例: インライン数式
+    fn_id: Optional[int] = None         # 脚注参照の id（どの断片に参照があるかの判定に使う）
 
 
 @dataclass
@@ -108,7 +109,69 @@ def _trim_trailing_spaces(atoms: list[_Atom]) -> tuple[list[_Atom], float]:
 _FIT_EPS = 0.2
 
 
+# 行幅を超える単語（URL 等）の分割候補。この文字の直後で折り返す（ハイフンは足さない）。
+_WORD_BREAK_AFTER = "/.-_?&="
+
+
+def _split_word(atom: _Atom, maxw: float) -> list[_Atom]:
+    """行幅を超える 1 語を、区切り文字の直後 → それでも超える片は文字単位で分割する。"""
+    pieces: list[str] = []
+    buf = ""
+    for ch in atom.text:
+        buf += ch
+        if ch in _WORD_BREAK_AFTER:
+            pieces.append(buf)
+            buf = ""
+    if buf:
+        pieces.append(buf)
+    out: list[_Atom] = []
+    for piece in pieces:
+        w = _stringwidth(piece, atom.run)
+        if w <= maxw + _FIT_EPS:
+            out.append(_Atom(piece, atom.run, w, "word"))
+            continue
+        buf = ""
+        for ch in piece:
+            if buf and _stringwidth(buf + ch, atom.run) > maxw + _FIT_EPS:
+                out.append(_Atom(buf, atom.run, _stringwidth(buf, atom.run), "word"))
+                buf = ""
+            buf += ch
+        if buf:
+            out.append(_Atom(buf, atom.run, _stringwidth(buf, atom.run), "word"))
+    return out
+
+
+def _split_long_words(atoms: list[_Atom], maxw: float) -> list[_Atom]:
+    if not any(a.kind == "word" and a.width > maxw + _FIT_EPS for a in atoms):
+        return atoms
+    out: list[_Atom] = []
+    for a in atoms:
+        if a.kind == "word" and a.width > maxw + _FIT_EPS:
+            out.extend(_split_word(a, maxw))
+        else:
+            out.append(a)
+    return out
+
+
+def _frag_atoms(lines: list[_Line]) -> list[_Atom]:
+    """分割断片用に、行群のアトムを平坦化する（強制改行は br として戻す）。"""
+    run = next((a.run for line in lines for a in line.atoms), None)
+    if run is None:
+        return []
+    out: list[_Atom] = []
+    for i, line in enumerate(lines):
+        if i and lines[i - 1].ragged:
+            out.append(_Atom("", run, 0.0, "br"))
+        elif i and out and line.atoms and out[-1].kind == "word" \
+                and line.atoms[0].kind == "word":
+            # 空白で折り返した英単語境界。空白を戻して再折り返しでも語が連結しないようにする
+            out.append(_Atom(" ", out[-1].run, _stringwidth(" ", out[-1].run), "space"))
+        out.extend(line.atoms)
+    return out
+
+
 def _break_lines(atoms: list[_Atom], maxw: float) -> list[_Line]:
+    atoms = _split_long_words(atoms, maxw)
     lines: list[_Line] = []
     cur: list[_Atom] = []
     curw = 0.0
@@ -188,16 +251,42 @@ class JParagraph(Flowable):
         self._atoms = _atomize(runs)
         self._lines: list[_Line] = []
         self._width = 0.0
+        self._continues = False  # split() の前半断片: 最終行もページをまたいで続く
+
+    @property
+    def footnote_ids(self) -> list[int]:
+        """この段落（断片ならその断片）に含まれる脚注参照 id（出現順・重複なし）。"""
+        ids: list[int] = []
+        for a in self._atoms:
+            fid = a.run.fn_id
+            if fid is not None and fid not in ids:
+                ids.append(fid)
+        return ids
 
     # --- レイアウト ------------------------------------------------------------------
     def wrap(self, availWidth: float, availHeight: float) -> tuple[float, float]:
+        # ReportLab は split() が返した断片にも wrap() を呼び直す。同じ幅なら組み直さない
+        # （断片の行はここで確定済み。組み直すと寡婦・孤児制御の結果が崩れうる）。
+        if self._lines and availWidth == self._width:
+            return availWidth, len(self._lines) * self.leading
         self._width = availWidth
         self._lines = _break_lines(self._atoms, availWidth)
+        if self._continues:
+            self._lines[-1].ragged = False  # 次ページへ続く最終行は均等割り付けを保つ
         return availWidth, len(self._lines) * self.leading
 
+    def _fragment(self, lines: list[_Line], width: float, space_before: float,
+                  space_after: float, bookmark, continues: bool) -> "JParagraph":
+        frag = JParagraph([], self.leading, self.align, space_before, space_after,
+                          self.base_size, bookmark)
+        frag._atoms = _frag_atoms(lines)   # 幅が変わって組み直されても本文を失わない
+        frag._lines = lines
+        frag._width = width
+        frag._continues = continues and not lines[-1].ragged
+        return frag
+
     def split(self, availWidth: float, availHeight: float):
-        if not self._lines:
-            self.wrap(availWidth, availHeight)
+        self.wrap(availWidth, availHeight)  # 同じ幅なら組み直さない
         total = len(self._lines)
         # ReportLab の Frame._add() は wrap() の高さが availHeight+_FUZZ(1e-6) を超えたら
         # 「収まらない」と判定して split() を呼ぶ。ここで横幅用の _FIT_EPS(0.2) を使うと
@@ -218,20 +307,13 @@ class JParagraph(Flowable):
         if n_fit < 1:
             return []
 
-        first = JParagraph(
-            [], self.leading, self.align, self.spaceBefore, 0.0, self.base_size,
-            self.bookmark,
-        )
-        first._lines = self._lines[:n_fit]
-        first._width = availWidth
-        if getattr(self, "footnote_ids", None):
-            first.footnote_ids = self.footnote_ids  # 分割時も脚注を失わない
-        rest = JParagraph(
-            [], self.leading, self.align, 0.0, self.spaceAfter, self.base_size, None,
-        )
-        rest._lines = self._lines[n_fit:]
-        rest._width = availWidth
-        rest._lines[-1].ragged = True
+        # 断片は行と元アトムの該当範囲を持つ（runs=[] だけだと wrap() で本文が消える）。
+        # 脚注 id も断片ごとのアトムから求まるので、後半の参照は後半のページに付く。
+        width = self._width
+        first = self._fragment(self._lines[:n_fit], width, self.spaceBefore, 0.0,
+                               self.bookmark, continues=True)
+        rest = self._fragment(self._lines[n_fit:], width, 0.0, self.spaceAfter, None,
+                              continues=self._continues)
         return [first, rest]
 
     # --- 描画 ------------------------------------------------------------------------

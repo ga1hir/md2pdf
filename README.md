@@ -43,7 +43,11 @@ md2pdf --list-presets
 # 個別に上書き（プリセットを基底に）
 md2pdf --trim 182x230 --chars 40 --lines 40 --font-size 10 input.md
 
+# 出力先の指定（--merge なしなら入力 1 件のときだけ）
+md2pdf -o /tmp/out.pdf input.md
+
 # 複数ファイルを 1 つの PDF に結合（章をまとめて 1 冊化）
+# 入力が 1 件でも見つからなければ結合せず終了コード 1
 md2pdf --merge -o book.pdf 01_*.md 02_*.md
 
 # 保存時に自動再生成（執筆しながらページ数確認）

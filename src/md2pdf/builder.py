@@ -161,7 +161,7 @@ class Builder:
         if inline is None:
             return
         ctx = _Ctx(size=self.layout.font_size)
-        runs, blocks, fn_ids = self._inline_collect(inline, ctx)
+        runs, blocks = self._inline(inline, ctx)
         # 段落先頭の全角スペース（字下げ）を復元する。markdown-it が空白として除去するため、
         # 元ソース行から個数を数えて Run として先頭へ戻す（1字=1em の CJK アトムとして組まれる）。
         n = self._leading_zenkaku(node)
@@ -172,8 +172,6 @@ class Builder:
                               space_after=self.styles.body.space_after)
             if indent:
                 para = _indented(para, indent)
-            if fn_ids:
-                para.footnote_ids = fn_ids
             story.append(para)
         story.extend(blocks)
 
@@ -227,7 +225,7 @@ class Builder:
             if ch.type == "paragraph" and not first_done:
                 inline = ch.children[0] if ch.children else None
                 ctx = _Ctx(size=self.layout.font_size)
-                runs, blocks, fn_ids = self._inline_collect(inline, ctx) if inline else ([], [], [])
+                runs, blocks = self._inline(inline, ctx) if inline else ([], [])
                 checkbox = None
                 # タスクリスト検出（先頭の [ ] / [x]）
                 if runs and runs[0].text:
@@ -244,8 +242,6 @@ class Builder:
                 para = JParagraph(runs, self.layout.leading,
                                   base_size=self.layout.font_size)
                 li = F.ListItem(para, marker_use, indent, checkbox)
-                if fn_ids:
-                    li.footnote_ids = fn_ids
                 story.append(li)
                 story.extend(blocks)
                 first_done = True
@@ -356,15 +352,9 @@ class Builder:
                                     space_after=self.styles.body.space_after))
 
     # --- インライン ------------------------------------------------------------------
-    def _inline_collect(self, inline: SyntaxTreeNode, ctx: _Ctx):
-        """インライン変換に加え、出現した脚注参照 id のリストも返す。"""
-        runs, blocks = self._inline(inline, ctx)
-        return runs, blocks, list(self._last_fn_ids)
-
     def _inline(self, inline: SyntaxTreeNode, ctx: _Ctx):
         runs: list[Run] = []
         blocks: list[Flowable] = []
-        self._last_fn_ids: list[int] = []
         self._walk_inline(inline, ctx, runs, blocks)
         return runs, blocks
 
@@ -401,8 +391,13 @@ class Builder:
                 rid = int(ch.meta.get("id", 0))
                 num = rid + 1
                 key = rid + self.fn_offset
-                runs.append(Run(str(num), ctx.font, ctx.size, config.COLOR_LINK, sup=True))
-                self._last_fn_ids.append(key)
+                prev = runs[-1] if runs else None
+                if prev is not None and prev.fn_id is not None:
+                    # 連続する参照は区切る（[^1][^2] が「12」と読めないよう「1,2」にする）。
+                    # 前の番号側に付けて、カンマが行頭に来ないようにする
+                    prev.text += ","
+                runs.append(Run(str(num), ctx.font, ctx.size, config.COLOR_LINK, sup=True,
+                                fn_id=key))
             elif t == "html_inline":
                 low = ch.content.lower()
                 if "<br" in low:
