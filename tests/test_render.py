@@ -423,3 +423,81 @@ def test_cli_output_without_merge(tmp_path):
     with pytest.raises(SystemExit) as e:
         main(["-o", str(out), str(a), str(b)])
     assert e.value.code == 2
+
+
+def _alert_box(src: str):
+    from md2pdf.render.flowables import _Container
+    story = Builder(layout.resolve("a4-38x35")).build(src)
+    assert story and isinstance(story[0], _Container)
+    return story[0]
+
+
+@pytest.mark.parametrize("marker,label", [
+    ("NOTE", "補足"), ("TIP", "ヒント"), ("IMPORTANT", "重要"),
+    ("WARNING", "警告"), ("CAUTION", "注意"), ("tip", "ヒント"),
+])
+def test_gfm_alert_types(tmp_path, marker, label):
+    """GFM アラートは種類ラベル付きで組まれ、[!…] マーカーは本文に残らない。"""
+    src = f"> [!{marker}]\n> アラート本文です。\n"
+    box = _alert_box(src)
+    assert box.kind == marker.lower()
+    out = tmp_path / "alert.pdf"
+    _convert(src, "a4-38x35", out)
+    text = _pdf_text(out)
+    assert label in text and "アラート本文です。" in text
+    assert "[!" not in text
+
+
+def test_gfm_alert_blank_line_after_marker():
+    """マーカー行の後に空行を挟んだ段落・後続ブロックもアラート本文になる。"""
+    box = _alert_box("> [!NOTE]\n>\n> 段落です。\n>\n> - 項目\n")
+    assert box.kind == "note"
+    assert len(box.children) == 3  # タイトル・段落・リスト項目
+
+
+@pytest.mark.parametrize("src", [
+    "> [!WARNING] 同じ行の本文\n",
+    "> [!FOO]\n> 未知の種類\n",
+    "> [!NOTE]\n",
+])
+def test_gfm_alert_not_matched(tmp_path, src):
+    """同一行本文・未知の種類・本文なしは通常の引用で、マーカーが文字として残る。"""
+    box = _alert_box(src)
+    assert not hasattr(box, "kind")
+    out = tmp_path / "quote.pdf"
+    _convert(src, "a4-38x35", out)
+    assert "[!" in _pdf_text(out)
+
+
+def test_gfm_alert_zenkaku_indent():
+    """マーカー次行の全角スペース字下げが保持される。"""
+    box = _alert_box("> [!NOTE]\n> 　字下げした本文。\n")
+    para = box.children[1]
+    assert isinstance(para, JParagraph)
+    text = "".join(r.text for r in para.runs)
+    assert text.startswith("　字") and not text.startswith("　　")
+
+
+def test_gfm_alert_title_not_orphaned():
+    """ページ末にタイトル行しか入らない場合は分割せず丸ごと次ページへ送る。"""
+    lay = layout.resolve("a4-38x35")
+    box = _alert_box("> [!NOTE]\n> " + _kana(38 * 5) + "\n")
+    w = lay.body_width
+    box.wrap(w, lay.body_height)
+    title_only = box.pad * 2 + lay.leading + 1.0
+    assert box.split(w, title_only) == []
+    parts = box.split(w, title_only + lay.leading * 2)
+    assert len(parts) == 2 and len(parts[0].children) == 2
+    assert parts[0].keep_head == 1 and parts[1].keep_head == 0
+
+
+def test_gfm_alert_page_spanning_and_footnote(tmp_path):
+    """複数ページに跨るアラートの本文が欠落せず、中の脚注も描画される。"""
+    body = _kana(38 * 50)
+    src = f"> [!WARNING]\n> {body}[^w]\n\n[^w]: あらーとのちゅう。\n"
+    out = tmp_path / "long.pdf"
+    pages = _convert(src, "a4-38x35", out)
+    assert pages >= 2
+    text = _pdf_text(out)
+    assert body in text
+    assert "あらーとのちゅう。" in text

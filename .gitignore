@@ -10,3 +10,9 @@ dist/
 !tests/assets/**/*.pdf
 .DS_Store
 .claude/scheduled_tasks.lock
+# 上流から生成するフォント（python -m md2pdf.fetch_fonts）
+src/md2pdf/fonts/*.ttf
+# ローカル専用（公開しない）
+CLAUDE.md
+docs/design.md
+.claude/

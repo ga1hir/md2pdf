@@ -21,6 +21,10 @@ dependencies = [
     "watchdog>=3.0",
 ]
 
+[project.optional-dependencies]
+# フォント生成（python -m md2pdf.fetch_fonts）用。出力をハッシュ照合するため版を固定する。
+fonts = ["fonttools==4.60.2", "otf2ttf==0.2", "cu2qu==1.6.7.post2"]
+
 [project.scripts]
 md2pdf = "md2pdf.cli:main"
 

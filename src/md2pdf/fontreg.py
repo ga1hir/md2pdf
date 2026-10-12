@@ -1,6 +1,7 @@
-"""同梱 Noto CJK フォントの登録。
+"""Noto CJK フォントの登録。
 
-ReportLab は CFF/OTF を埋め込めないため、同梱フォントはすべて TrueType(glyf)。
+フォントは fonts/ に置く（リポジトリには含めず、python -m md2pdf.fetch_fonts で上流から生成する）。
+ReportLab は CFF/OTF を埋め込めないため、フォントはすべて TrueType(glyf)。
 本文=明朝(NotoSerifJP)、見出し=ゴシック(NotoSansJP)、コード=等幅(NotoSansMonoCJKjp)。
 それぞれ Regular/Bold を登録し、Paragraph の <b> が効くよう FontFamily も登録する。
 等幅 Bold は容量節約のため Regular を流用する。
@@ -33,7 +34,7 @@ def fonts_dir() -> Path:
 
 
 def register_fonts() -> None:
-    """同梱フォントを ReportLab に登録する（多重呼び出しは無視）。"""
+    """fonts/ のフォントを ReportLab に登録する（多重呼び出しは無視）。"""
     global _registered
     if _registered:
         return
@@ -43,8 +44,10 @@ def register_fonts() -> None:
         path = d / filename
         if not path.exists():
             raise FileNotFoundError(
-                f"同梱フォントが見つかりません: {path}\n"
-                "fonts/ ディレクトリに Noto CJK の TTF が必要です。"
+                f"フォントが見つかりません: {path}\n"
+                "次のコマンドで Noto CJK フォントを取得・生成してください:\n"
+                "  pip install -e '.[fonts]'   （リポジトリのディレクトリで）\n"
+                "  python -m md2pdf.fetch_fonts"
             )
         pdfmetrics.registerFont(TTFont(logical, str(path)))
 

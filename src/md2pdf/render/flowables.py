@@ -185,13 +185,14 @@ class _Container(Flowable):
     def __init__(self, children: list[Flowable], indent: float = 0.0,
                  bar: Optional[Color] = None, bg: Optional[Color] = None,
                  pad: float = 4.0, space_before: float = 0.0,
-                 space_after: float = 0.0) -> None:
+                 space_after: float = 0.0, keep_head: int = 0) -> None:
         super().__init__()
         self.children = children
         self.indent = indent
         self.bar = bar
         self.bg = bg
         self.pad = pad
+        self.keep_head = keep_head  # 先頭 N 子だけでの分割を禁止（アラートのタイトル孤立防止）
         self.spaceBefore = space_before
         self.spaceAfter = space_after
         self._width = 0.0
@@ -233,10 +234,10 @@ class _Container(Flowable):
             break
         else:
             return [self]
-        if not head_children:
-            return []
+        if len(head_children) <= self.keep_head:
+            return []  # 空、またはタイトルだけがページ末に残る → 丸ごと次ページへ
         head = _Container(head_children, self.indent, self.bar, self.bg,
-                          self.pad, self.spaceBefore, 0.0)
+                          self.pad, self.spaceBefore, 0.0, self.keep_head)
         tail = _Container(rest_children, self.indent, self.bar, self.bg,
                           self.pad, 0.0, self.spaceAfter)
         return [head, tail]
@@ -261,6 +262,96 @@ def blockquote(children: list[Flowable], space: float) -> _Container:
     return _Container(children, indent=0.0, bar=config.COLOR_QUOTE_BAR,
                       bg=config.COLOR_QUOTE_BG, pad=5.0,
                       space_before=space * 0.3, space_after=space * 0.3)
+
+
+def _draw_alert_icon(c, kind: str, x: float, y: float, s: float, color: Color) -> None:
+    """GFM アラートの octicon 風アイコンを (x, y) を左下とする s×s の枠に線画で描く。
+
+    フォントの cmap に依存しないよう、記号グリフではなく canvas の図形で描画する。
+    """
+    lw = s * 0.09
+    c.saveState()
+    c.setStrokeColor(color)
+    c.setFillColor(color)
+    c.setLineWidth(lw)
+    c.setLineCap(1)
+    c.setLineJoin(1)
+
+    def P(px: float, py: float) -> tuple[float, float]:
+        return x + px * s, y + py * s
+
+    def polygon(pts) -> None:
+        p = c.beginPath()
+        p.moveTo(*P(*pts[0]))
+        for pt in pts[1:]:
+            p.lineTo(*P(*pt))
+        p.close()
+        c.drawPath(p, stroke=1, fill=0)
+
+    def line(x0: float, y0: float, x1: float, y1: float) -> None:
+        c.line(*P(x0, y0), *P(x1, y1))
+
+    def bang(top: float, bottom: float, dot: float) -> None:
+        line(0.5, top, 0.5, bottom)
+        c.circle(*P(0.5, dot), lw * 0.75, stroke=0, fill=1)
+
+    if kind == "note":  # 丸に i
+        c.circle(*P(0.5, 0.5), s * 0.44, stroke=1, fill=0)
+        line(0.5, 0.25, 0.5, 0.50)
+        c.circle(*P(0.5, 0.70), lw * 0.75, stroke=0, fill=1)
+    elif kind == "tip":  # 電球
+        c.circle(*P(0.5, 0.62), s * 0.32, stroke=1, fill=0)
+        line(0.38, 0.30, 0.38, 0.20)
+        line(0.62, 0.30, 0.62, 0.20)
+        line(0.36, 0.18, 0.64, 0.18)
+        line(0.42, 0.04, 0.58, 0.04)
+    elif kind == "important":  # 吹き出しに !
+        polygon([(0.06, 0.95), (0.94, 0.95), (0.94, 0.28), (0.45, 0.28),
+                 (0.22, 0.06), (0.22, 0.28), (0.06, 0.28)])
+        bang(0.82, 0.58, 0.42)
+    elif kind == "warning":  # 三角に !
+        polygon([(0.5, 0.95), (0.96, 0.08), (0.04, 0.08)])
+        bang(0.66, 0.40, 0.24)
+    else:  # caution: 八角形に !
+        a, b = 0.06, 0.32
+        polygon([(b, 0.94), (1 - b, 0.94), (1 - a, 1 - b), (1 - a, b),
+                 (1 - b, 0.06), (b, 0.06), (a, b), (a, 1 - b)])
+        bang(0.74, 0.44, 0.27)
+    c.restoreState()
+
+
+class AlertTitle(Flowable):
+    """GFM アラートのタイトル行（アイコン＋種類色の太字ラベル）。高さはちょうど 1 行送り。"""
+
+    def __init__(self, kind: str, size: float, leading: float) -> None:
+        super().__init__()
+        self.kind = kind
+        self.label, self.color = config.ALERT_TYPES[kind]
+        self.size = size
+        self.leading = leading
+        self.keepWithNext = 1
+        self._gutter = size * 1.4
+
+    def wrap(self, availWidth: float, availHeight: float):
+        return availWidth, self.leading
+
+    def draw(self) -> None:
+        c = self.canv
+        baseline = self.leading - self.size * 0.86  # JParagraph の 1 行目と同じ基準
+        icon = self.size * 0.95
+        _draw_alert_icon(c, self.kind, 0, baseline - self.size * 0.1, icon, self.color)
+        c.setFont(config.FONT_SANS_BOLD, self.size)
+        c.setFillColor(self.color)
+        c.drawString(self._gutter, baseline, self.label)
+
+
+def alert(children: list[Flowable], kind: str, space: float) -> _Container:
+    """GFM アラート（> [!NOTE] 等）。children の先頭は AlertTitle を想定。"""
+    box = _Container(children, indent=0.0, bar=config.ALERT_TYPES[kind][1], bg=None,
+                     pad=5.0, space_before=space * 0.3, space_after=space * 0.3,
+                     keep_head=1)
+    box.kind = kind
+    return box
 
 
 class ListItem(Flowable):

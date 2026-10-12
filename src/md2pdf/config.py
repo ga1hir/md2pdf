@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from reportlab.lib.colors import HexColor
 
-# --- フォント論理名（fonts/ に同梱した実ファイルを registry.py で登録する） -----------
+# --- フォント論理名（fonts/ に置いた実ファイルを fontreg.py で登録する） -------------
 # 明朝（本文）/ ゴシック（見出し）/ 等幅（コード）。CJK と Latin を兼ねる。
 FONT_SERIF = "NotoSerifJP"          # 本文
 FONT_SERIF_BOLD = "NotoSerifJP-Bold"
@@ -34,6 +34,15 @@ COLOR_INLINE_CODE_BORDER = HexColor("#e0e0e0")
 COLOR_QUOTE_BAR = HexColor("#cccccc")
 COLOR_QUOTE_BG = HexColor("#fafafa")
 COLOR_QUOTE_TEXT = HexColor("#555555")
+
+# GFM アラート（> [!NOTE] 等）: 種類 → (表示ラベル, 色)。色は GitHub ライトテーマ準拠。
+ALERT_TYPES = {
+    "note": ("補足", HexColor("#0969da")),
+    "tip": ("ヒント", HexColor("#1a7f37")),
+    "important": ("重要", HexColor("#8250df")),
+    "warning": ("警告", HexColor("#9a6700")),
+    "caution": ("注意", HexColor("#d1242f")),
+}
 
 # テーブル
 COLOR_TABLE_BORDER = HexColor("#999999")

@@ -31,6 +31,7 @@ from .render.styles import Styles
 
 _RUBY_RE = re.compile(r"\{([^|{}]+)\|([^|{}]+)\}")
 _TASK_RE = re.compile(r"^\[([ xX])\]\s+")
+_ALERT_RE = re.compile(r"^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$", re.IGNORECASE)
 _FONT_MAP = {
     "serif": (config.FONT_SERIF, config.FONT_SERIF_BOLD),
     "sans": (config.FONT_SANS, config.FONT_SANS_BOLD),
@@ -195,10 +196,46 @@ class Builder:
         story.append(cb)
 
     def _blockquote(self, node: SyntaxTreeNode, story: list[Flowable]) -> None:
+        kind = self._alert_kind(node)
+        if kind:
+            self._alert(node, kind, story)
+            return
         inner: list[Flowable] = []
         for ch in node.children:
             self._block(ch, inner, indent=0.0)
         story.append(F.blockquote(inner, self.layout.leading))
+
+    def _alert_kind(self, node: SyntaxTreeNode) -> Optional[str]:
+        """引用が GFM アラート（先頭行が [!NOTE] 等のみ）なら種類名（小文字）を返す。
+
+        GitHub に合わせ、マーカーと同じ行に本文が続く場合・未知の種類・本文が空の場合は
+        通常の引用とする。
+        """
+        children = node.children
+        if not children or children[0].type != "paragraph" or not children[0].children:
+            return None
+        items = children[0].children[0].children
+        if not items or items[0].type != "text":
+            return None
+        m = _ALERT_RE.match(items[0].content)
+        if not m:
+            return None
+        if len(items) > 1 and items[1].type not in ("softbreak", "hardbreak"):
+            return None
+        if len(items) <= 2 and len(children) == 1:
+            return None
+        return m.group(1).lower()
+
+    def _alert(self, node: SyntaxTreeNode, kind: str, story: list[Flowable]) -> None:
+        inner: list[Flowable] = [F.AlertTitle(kind, self.layout.font_size, self.layout.leading)]
+        # マーカーと直後の改行を除く。次行頭の全角字下げは text に残るのでそのまま組まれる。
+        inline = node.children[0].children[0]
+        inline.children = inline.children[2:]
+        for ch in node.children:
+            if ch.type == "paragraph" and not ch.children[0].children:
+                continue  # マーカーだけの段落
+            self._block(ch, inner, indent=0.0)
+        story.append(F.alert(inner, kind, self.layout.leading))
 
     def _list(self, node: SyntaxTreeNode, story: list[Flowable], indent: float,
               ordered: bool) -> None:

@@ -5,7 +5,7 @@ Markdown を **最終版面の PDF** に変換し、書籍原稿が「仕上が�
 （フォント埋め込み・テキスト選択可・ノンブル・PDF しおり）を備えます。
 
 **pandoc / WeasyPrint / Node / ブラウザに依存しません。** `pip` で入る純 Python
-パッケージのみで動作し、日本語フォントを同梱するためオフラインでも全環境で同じ見た目になります。
+パッケージのみで動作し、日本語フォントをパッケージ内に置いて使うため、オフラインでも全環境で同じ見た目になります。
 
 ## 特徴
 
@@ -14,20 +14,29 @@ Markdown を **最終版面の PDF** に変換し、書籍原稿が「仕上が�
 - **日本語組版** — 明朝（本文）/ ゴシック（見出し）、禁則処理、均等割り付け、ルビ（`{漢字|かんじ}`）。
 - **コードブロック** — シンタックスハイライト（tango 配色）＋空白可視化（半角スペース→`·`、
   全角→`□`、タブ→`→`、行末→`⏎`）、背景・枠、ページ跨ぎ対応。
-- **表・引用・リスト・タスクリスト・脚注**（ページ内別枠）・**数式**（純 Python 描画）・
+- **表・引用・GFM アラート・リスト・タスクリスト・脚注**（ページ内別枠）・**数式**（純 Python 描画）・
   **Mermaid**（flowchart / sequence をローカル描画）・**画像**（ラスタ / SVG）。
 - **複数ファイルの結合出力**、**ノンブル**、**PDF しおり**、**`--watch`** 自動再生成。
 
 ## インストール
 
 ```bash
-pip install .
-# 開発時:  pip install -e .
+git clone https://github.com/ga1hir/md2pdf.git
+cd md2pdf
+python3 -m venv .venv && source .venv/bin/activate
+pip install -U pip              # macOS 標準 Python 3.9 の pip 21 は editable install 非対応
+pip install -e '.[fonts]'
+python -m md2pdf.fetch_fonts   # 日本語フォントを取得・生成（初回のみ・要ネット接続）
 ```
 
 Python 3.9 以上。依存（`markdown-it-py` / `Pygments` / `reportlab` / `matplotlib` /
-`resvg-py` / `svglib` / `watchdog`）は自動で入ります。日本語フォント（Noto CJK, SIL OFL）は同梱です。
-SVG は resvg（同梱フォントで機種非依存に描画）を優先し、未導入環境では svglib にフォールバックします。
+`resvg-py` / `svglib` / `watchdog`）は自動で入ります。
+
+日本語フォント（Noto Serif JP / Noto Sans JP / Noto Sans Mono CJK JP, SIL OFL）はリポジトリに含めず、
+`fetch_fonts` が上流（google/fonts, notofonts/noto-cjk）からコミット固定で取得し、ReportLab が埋め込める
+TrueType に変換して `src/md2pdf/fonts/` に置きます。入力・出力とも SHA-256 で照合するので、
+どの環境でも同一のフォントになり、ページ数が変わりません。生成後はオフラインで動作します。
+SVG は resvg（このフォントで機種非依存に描画）を優先し、未導入環境では svglib にフォールバックします。
 
 ## 使い方
 
@@ -80,7 +89,8 @@ md2pdf --no-page-number input.md
 ## 対応する Markdown
 
 見出し、段落、強調、リスト（番号付き／なし／タスクリスト）、コードブロック、
-インラインコード、表、引用、水平線、リンク、画像（PNG/JPEG/SVG）、脚注、定義リスト、
+インラインコード、表、引用、GFM アラート（`> [!NOTE]` / `[!TIP]` / `[!IMPORTANT]` /
+`[!WARNING]` / `[!CAUTION]`）、水平線、リンク、画像（PNG/JPEG/SVG）、脚注、定義リスト、
 数式（`$...$` / `$$...$$`）、Mermaid（` ```mermaid `）、ルビ（`{漢字|かんじ}`）、
 手動改ページ（`<!-- pagebreak -->`）。
 
@@ -92,9 +102,7 @@ md2pdf --no-page-number input.md
 - SVG 画像内に埋め込まれた CJK テキストはフォント解決の都合で字形が出ない場合があります
   （図形は問題ありません）。
 
-詳細な設計は [docs/design.md](docs/design.md) を参照してください。
-
 ## ライセンス
 
-MIT License。同梱フォントは SIL Open Font License（[src/md2pdf/fonts/](src/md2pdf/fonts/) の
-各 LICENSE を参照）。
+MIT License（[LICENSE](LICENSE)）。日本語フォントは SIL Open Font License
+（[src/md2pdf/fonts/](src/md2pdf/fonts/) の各 LICENSE を参照）。
