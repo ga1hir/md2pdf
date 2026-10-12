@@ -296,6 +296,65 @@ def test_split_fragments_survive_rewrap():
     assert len(first._lines) == 4 and not first._lines[-1].ragged  # 続く行は両端揃え
 
 
+@pytest.mark.parametrize("preset", ["a4-38x35", "b5h-40x40"])
+def test_page_spanning_code_block_not_lost(tmp_path, preset):
+    """ページ下部から始まり、ページをまたぐコードブロックの全行が PDF に出る（GitHub #1）。
+
+    旧版は CodeBlock.split() の断片が lines=[] で、wrap() の呼び直しで中身が消えていた。"""
+    import re
+    lay = layout.resolve(preset)
+    body = "\n\n".join("　" + _kana(lay.chars_per_line * 2) for _ in range(lay.lines_per_page // 2 - 4))
+    code = "\n".join(f"codeline{chr(65 + i % 26)}{chr(97 + i // 26)}" for i in range(lay.lines_per_page))
+    src = f"{body}\n\n```text\n{code}\n```\n\n　後続の段落。\n"
+    out = tmp_path / "code.pdf"
+    pages = _convert(src, preset, out)
+    assert pages >= 2
+    text = re.sub(r"[·⏎]", "", _pdf_text(out))
+    for i in range(lay.lines_per_page):
+        assert f"codeline{chr(65 + i % 26)}{chr(97 + i // 26)}" in text
+    assert "後続の段落" in text
+
+
+def test_code_block_split_fragments_survive_rewrap():
+    """CodeBlock.split() の断片は wrap() を呼び直しても（幅が変わっても）行を失わない（GitHub #1）。"""
+    from md2pdf import config, fontreg
+    from md2pdf.render.flowables import CodeBlock
+    fontreg.register_fonts()
+    lay = layout.resolve("b5h-40x40")
+    lines = [[Run(f"line {i:02d}: sample output text", config.FONT_MONO, lay.font_size)]
+             for i in range(1, 26)]
+    cb = CodeBlock(lines, lay.font_size, lay.leading)
+    cb.wrap(lay.body_width, 1e9)
+    head, tail = cb.split(lay.body_width, lay.leading * 10)
+
+    def joined(b):
+        return "".join(r.text for line in b._visual for r in line)
+
+    expected = "".join(r.text for line in lines for r in line)
+    for w in (lay.body_width, lay.body_width * 0.4):
+        head.wrap(w, 1e9)
+        tail.wrap(w, 1e9)
+        assert joined(head) + joined(tail) == expected
+    head.wrap(lay.body_width, 1e9)
+    tail.wrap(lay.body_width, 1e9)
+    assert (len(head._visual), len(tail._visual)) == (9, 16)
+
+
+def test_code_block_split_keeps_outer_spacing():
+    """分割した前半は元の spaceBefore、後半は元の spaceAfter を持つ（GitHub #2）。"""
+    from md2pdf import config, fontreg
+    from md2pdf.render.flowables import CodeBlock
+    fontreg.register_fonts()
+    lay = layout.resolve("b5h-40x40")
+    lines = [[Run(f"line {i:02d}", config.FONT_MONO, lay.font_size)] for i in range(25)]
+    cb = CodeBlock(lines, lay.font_size, lay.leading)
+    cb.spaceBefore = cb.spaceAfter = lay.leading * 0.3
+    cb.wrap(lay.body_width, 1e9)
+    head, tail = cb.split(lay.body_width, lay.leading * 10)
+    assert (head.spaceBefore, head.spaceAfter) == (cb.spaceBefore, 0)
+    assert (tail.spaceBefore, tail.spaceAfter) == (0, cb.spaceAfter)
+
+
 def test_split_fragment_footnote_ids():
     """分割後の後半にある脚注参照は後半の断片に属する（#8）。"""
     lay = layout.resolve("b5h-40x40")

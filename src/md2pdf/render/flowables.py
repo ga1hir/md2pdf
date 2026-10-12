@@ -59,6 +59,8 @@ class CodeBlock(Flowable):
         self.leading = leading
         self.first = first          # 連続ブロックの先頭か（上余白/角丸）
         self.last = last            # 末尾か
+        self.spaceBefore = 0.0      # builder が設定する
+        self.spaceAfter = 0.0
         self._visual: list[list[Run]] = []
         self._width = 0.0
 
@@ -83,12 +85,16 @@ class CodeBlock(Flowable):
             return [self]
         if avail_lines < 1:
             return []
-        head = CodeBlock([], self.size, self.leading, first=self.first, last=False)
-        head._visual = self._visual[:avail_lines]
-        head._width = availWidth
-        tail = CodeBlock([], self.size, self.leading, first=False, last=self.last)
-        tail._visual = self._visual[avail_lines:]
-        tail._width = availWidth
+        # 断片は視覚行を論理行として持つ。ReportLab が断片に wrap() を呼び直しても
+        # 同幅なら同じ視覚行に、狭ければさらに折り返されるだけで中身は失われない（GitHub #1）。
+        head = CodeBlock(self._visual[:avail_lines], self.size, self.leading,
+                         first=self.first, last=False)
+        head.spaceBefore = self.spaceBefore  # 前の空きは前半、後の空きは後半が持つ（GitHub #2）
+        head.wrap(availWidth, availHeight)
+        tail = CodeBlock(self._visual[avail_lines:], self.size, self.leading,
+                         first=False, last=self.last)
+        tail.spaceAfter = self.spaceAfter
+        tail.wrap(availWidth, availHeight)
         return [head, tail]
 
     def draw(self) -> None:
