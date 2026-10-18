@@ -30,6 +30,9 @@ from .render.mermaid import render_mermaid
 from .render.styles import Styles
 
 _RUBY_RE = re.compile(r"\{([^|{}]+)\|([^|{}]+)\}")
+# 下線タグ。markdown-it は <u> と </u> を別々の html_inline トークンとして出す
+_U_OPEN_RE = re.compile(r"^<u(\s[^>]*)?>$", re.IGNORECASE)
+_U_CLOSE_RE = re.compile(r"^</u\s*>$", re.IGNORECASE)
 _TASK_RE = re.compile(r"^\[([ xX])\]\s+")
 _ALERT_RE = re.compile(r"^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$", re.IGNORECASE)
 _FONT_MAP = {
@@ -76,6 +79,7 @@ class Builder:
         self._bm = 0
         self._outline_stack: list[int] = []  # しおりの階層正規化用
         self._src_lines: list[str] = []      # build() で設定（字下げ復元用）
+        self._u_depth = 0                    # <u> の入れ子深さ（インライン塊ごとにリセット）
 
     def next_file(self) -> None:
         """結合出力で次ファイルへ進む前に脚注オフセットを更新する。"""
@@ -374,16 +378,26 @@ class Builder:
             story.append(PageBreak())
             # ページ区切り div 等に本文が無ければここで終わり
             text = _html_to_text(content)
-            if not text.strip():
+            if not _strip_u_sentinels(text).strip():
                 return
         if low.strip().startswith("<!--"):
             return  # コメントは無視
         text = _html_to_text(content)
+        self._u_depth = 0
         for para in text.split("\n\n"):
             para = para.strip("\n")
-            if not para.strip():
+            if not _strip_u_sentinels(para).strip():
                 continue
-            runs = self._text_runs(para, _Ctx(size=self.layout.font_size))
+            # <u>/</u> の番兵で区切り、下線の有無を切り替えながら Run 化する
+            runs: list[Run] = []
+            ctx = _Ctx(size=self.layout.font_size)
+            for part in re.split(f"([{_U_OPEN}{_U_CLOSE}])", para):
+                if part == _U_OPEN:
+                    self._u_depth += 1
+                elif part == _U_CLOSE:
+                    self._u_depth = max(0, self._u_depth - 1)
+                elif part:
+                    runs.extend(self._text_runs(part, ctx))
             story.append(JParagraph(runs, self.layout.leading,
                                     base_size=self.layout.font_size,
                                     space_after=self.styles.body.space_after))
@@ -392,6 +406,7 @@ class Builder:
     def _inline(self, inline: SyntaxTreeNode, ctx: _Ctx):
         runs: list[Run] = []
         blocks: list[Flowable] = []
+        self._u_depth = 0  # 閉じ忘れの <u> を前の段落から持ち越さない
         self._walk_inline(inline, ctx, runs, blocks)
         return runs, blocks
 
@@ -411,7 +426,8 @@ class Builder:
                 runs.append(Run(ch.content, config.FONT_MONO,
                                 self.styles.code_size, config.COLOR_CODE_DEFAULT,
                                 bg=config.COLOR_INLINE_CODE_BG,
-                                border=config.COLOR_INLINE_CODE_BORDER))
+                                border=config.COLOR_INLINE_CODE_BORDER,
+                                underline=self._u_depth > 0))
             elif t == "link":
                 href = ch.attrs.get("href", "")
                 self._walk_inline(ch, ctx.copy(color=config.COLOR_LINK, link=href),
@@ -436,8 +452,12 @@ class Builder:
                 runs.append(Run(str(num), ctx.font, ctx.size, config.COLOR_LINK, sup=True,
                                 fn_id=key))
             elif t == "html_inline":
-                low = ch.content.lower()
-                if "<br" in low:
+                tag = ch.content.strip()
+                if _U_OPEN_RE.match(tag):
+                    self._u_depth += 1
+                elif _U_CLOSE_RE.match(tag):
+                    self._u_depth = max(0, self._u_depth - 1)  # 余分な </u> は無視
+                elif "<br" in tag.lower():
                     runs.append(Run("\n", ctx.font, ctx.size, ctx.color))
             else:
                 self._walk_inline(ch, ctx, runs, blocks)
@@ -446,15 +466,17 @@ class Builder:
         """テキストをルビ記法で分割しつつ Run 列へ。"""
         out: list[Run] = []
         pos = 0
+        ul = bool(ctx.link) or self._u_depth > 0
         for m in _RUBY_RE.finditer(text):
             if m.start() > pos:
                 out.append(Run(text[pos:m.start()], ctx.font, ctx.size, ctx.color,
-                               underline=bool(ctx.link), link=ctx.link))
-            out.append(Run(m.group(1), ctx.font, ctx.size, ctx.color, ruby=m.group(2)))
+                               underline=ul, link=ctx.link))
+            out.append(Run(m.group(1), ctx.font, ctx.size, ctx.color, ruby=m.group(2),
+                           underline=ul, link=ctx.link))
             pos = m.end()
         if pos < len(text):
             out.append(Run(text[pos:], ctx.font, ctx.size, ctx.color,
-                           underline=bool(ctx.link), link=ctx.link))
+                           underline=ul, link=ctx.link))
         return out
 
     def _inline_image(self, node: SyntaxTreeNode, blocks: list[Flowable]) -> None:
@@ -522,6 +544,20 @@ def _cell_align(cell: SyntaxTreeNode) -> str:
 
 
 _BR_SENTINEL = "\x00"
+_U_OPEN = "\x01"   # html_block 内の <u>（_html で下線開始に戻す）
+_U_CLOSE = "\x02"  # 同 </u>
+
+
+def _strip_u_sentinels(text: str) -> str:
+    return text.replace(_U_OPEN, "").replace(_U_CLOSE, "")
+
+
+def _strip_line(ln: str) -> str:
+    """行頭・行末の空白を除く。<u> の番兵の外側にある空白（`<u>\\n本文` 由来）も除く。"""
+    lead = re.match(r"[\s\x01\x02]*", ln).group()
+    ln = re.sub(r"\s", "", lead) + ln[len(lead):]
+    trail = re.search(r"[\s\x01\x02]*$", ln).group()
+    return ln[:len(ln) - len(trail)] + re.sub(r"\s", "", trail)
 
 
 def _html_to_text(content: str) -> str:
@@ -530,11 +566,13 @@ def _html_to_text(content: str) -> str:
     s = re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL)
     s = re.sub(r"<br\s*/?>", _BR_SENTINEL, s, flags=re.IGNORECASE)
     s = re.sub(r"</(p|div|li|tr|h[1-6])>", _BR_SENTINEL, s, flags=re.IGNORECASE)
+    s = re.sub(r"<u(\s[^>]*)?>", _U_OPEN, s, flags=re.IGNORECASE)
+    s = re.sub(r"</u\s*>", _U_CLOSE, s, flags=re.IGNORECASE)
     s = re.sub(r"<[^>]+>", "", s)            # 残りのタグを除去
     s = re.sub(r"\s+", " ", s)               # ソース改行・連続空白を 1 空白へ畳む
     s = s.replace(_BR_SENTINEL, "\n")
     s = html.unescape(s)
-    lines = [ln.strip() for ln in s.split("\n")]
+    lines = [_strip_line(ln) for ln in s.split("\n")]
     # 末尾の空行を除去
     while lines and not lines[-1]:
         lines.pop()

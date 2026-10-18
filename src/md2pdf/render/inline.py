@@ -387,11 +387,15 @@ class JParagraph(Flowable):
                 c.setFillColor(run.color)
                 c.drawString(rx, ry, run.ruby)
 
-            # リンク下線＋注釈
+            # 下線（リンク・<u>）＋リンク注釈
             if run.underline and atom.text:
+                # 両端揃えの字間 extra も、次の原子が下線付きなら引いて線を途切れさせない
+                uw = atom.width
+                if idx < n - 1 and atoms[idx + 1].run.underline and atoms[idx + 1].text:
+                    uw += extra
                 c.setStrokeColor(run.color)
                 c.setLineWidth(0.5)
-                c.line(x, baseline - 1.2, x + atom.width, baseline - 1.2)
+                c.line(x, baseline - 1.2, x + uw, baseline - 1.2)
             if run.link and atom.text:
                 c.linkURL(run.link, (x, baseline - 2, x + atom.width, baseline + size),
                           relative=0, thickness=0)

@@ -560,3 +560,107 @@ def test_gfm_alert_page_spanning_and_footnote(tmp_path):
     text = _pdf_text(out)
     assert body in text
     assert "あらーとのちゅう。" in text
+
+
+def _para_runs(src: str, preset: str = "a4-38x35") -> list[list[Run]]:
+    lay = layout.resolve(preset)
+    return [f.runs for f in Builder(lay).build(src) if isinstance(f, JParagraph)]
+
+
+def test_u_tag_underlines_runs():
+    """<u>…</u> の間だけ下線が付き、タグ文字は本文に漏れない。"""
+    (runs,) = _para_runs("前<u>下線</u>後\n")
+    assert "".join(r.text for r in runs) == "前下線後"
+    assert [(r.text, r.underline) for r in runs] == [
+        ("前", False), ("下線", True), ("後", False)]
+
+
+def test_u_tag_with_bold_ruby_code_link():
+    (runs,) = _para_runs("<u>**太字**と{漢字|かんじ}と`code`と[リンク](https://e.x)</u>外\n")
+    by_text = {r.text: r for r in runs}
+    assert by_text["太字"].underline and by_text["太字"].font != by_text["と"].font
+    assert by_text["漢字"].underline and by_text["漢字"].ruby == "かんじ"
+    assert by_text["code"].underline and by_text["code"].bg is not None
+    assert by_text["リンク"].underline and by_text["リンク"].link == "https://e.x"
+    assert not by_text["外"].underline
+
+
+@pytest.mark.parametrize("src", ['<U>大</U>\n', '<u class="x">大</u>\n', '<u >大</u >\n'])
+def test_u_tag_case_and_attrs(src):
+    (runs,) = _para_runs(src)
+    assert [(r.text, r.underline) for r in runs] == [("大", True)]
+
+
+def test_u_tag_unclosed_does_not_leak():
+    """閉じ忘れの <u> は段落末で打ち切る。余分な </u> は無視する。"""
+    a, b = _para_runs("<u>開いたまま\n\n次の段落</u>と</u>余分\n")
+    assert all(r.underline for r in a if r.text)
+    assert not any(r.underline for r in b)
+    assert "".join(r.text for r in b) == "次の段落と余分"
+
+
+def test_38x35_underline_grid_exact():
+    """test_38x35.md の下線テスト: 38 字 × 35 行のまま、各行の下線字数が想定どおり。"""
+    src = (ASSETS / "test_38x35.md").read_text(encoding="utf-8")
+    i = src.find("-->", src.find("## 下線テスト")) + len("-->")
+    lay = layout.resolve("a4-38x35")
+    para = next(f for f in Builder(lay).build(src[i:]) if isinstance(f, JParagraph))
+    para.wrap(lay.body_width, 1e9)
+    chars = [sum(len(a.text) for a in line.atoms) for line in para._lines]
+    under = [sum(len(a.text) for a in line.atoms if a.run.underline)
+             for line in para._lines]
+    assert len(para._lines) == 35
+    assert chars == [38] * 35
+    # 1 全体 / 5 複数区間 / 8 ルビ / 10 入れ子 / 13 余分な </u> / 14〜16 行またぎ / 17〜 16 字ずつ
+    assert under == [38, 10, 10, 10, 16, 10, 6, 3, 10, 12, 10, 10, 0, 8, 38, 8] + [16] * 19
+
+
+def test_u_tag_not_confused_with_other_tags():
+    (runs,) = _para_runs("<ul>a</ul>と<b>b</b>\n")
+    assert not any(r.underline for r in runs)
+
+
+def test_u_tag_in_html_block():
+    (runs,) = _para_runs("<u>\n下線ブロック\n</u>\n")
+    assert [(r.text, r.underline) for r in runs] == [("下線ブロック", True)]
+    (runs,) = _para_runs("<p>前<u>中</u>後</p>\n")
+    assert [(r.text, r.underline) for r in runs] == [
+        ("前", False), ("中", True), ("後", False)]
+
+
+def test_u_tag_keeps_grid():
+    """下線は字幅を変えない: 38 字の段落は 1 行 38 字のまま。"""
+    lay = layout.resolve("a4-38x35")
+    text = "あ" * 10 + "<u>" + "い" * 18 + "</u>" + "う" * 10
+    para = next(f for f in Builder(lay).build(text + "\n") if isinstance(f, JParagraph))
+    para.wrap(lay.body_width, 1e9)
+    assert [len(line.atoms) for line in para._lines] == [38]
+
+
+class _LineRecorder:
+    """JParagraph.draw が引く線だけを記録する偽キャンバス。"""
+
+    def __init__(self):
+        self.lines = []
+
+    def line(self, x1, y1, x2, y2):
+        self.lines.append((x1, x2))
+
+    def __getattr__(self, name):
+        return lambda *a, **k: None
+
+
+def test_u_underline_continuous_when_justified():
+    """両端揃えで字間が空いても、下線区間は途切れずにつながる。"""
+    lay = layout.resolve("a4-38x35")
+    # 2 行目に送られる 1 行目は ragged でないので字間 extra が入る
+    text = "<u>" + "あ" * 30 + "abc " * 6 + "</u>"
+    para = next(f for f in Builder(lay).build(text + "\n") if isinstance(f, JParagraph))
+    para.wrap(lay.body_width, 1e9)
+    assert len(para._lines) >= 2
+    para.canv = _LineRecorder()
+    para._draw_line(para._lines[0], 0.0)
+    segs = para.canv.lines
+    assert len(segs) == len(para._lines[0].atoms)
+    for (_, end), (start, _) in zip(segs, segs[1:]):
+        assert abs(end - start) < 1e-6
