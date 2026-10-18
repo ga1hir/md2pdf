@@ -65,7 +65,14 @@ md2pdf --watch input.md
 # メタデータ／ノンブル
 md2pdf --title "私の本" --author "著者名" input.md
 md2pdf --no-page-number input.md
+
+# ノンブルを途中のページから始める（章ごとに分けて出力する場合）
+md2pdf --start-page 21 ch02.md
+md2pdf --start-page 21 ch02.md ch03.md   # ch03 は ch02 の最終ページの次から連番
 ```
+
+`--start-page` は紙面のノンブルに加えて PDF のページラベルも設定するため、PDF ビューアの
+ページ表示も同じ番号になります。`--merge` と併用すると結合 PDF 全体の通し番号の開始値になります。
 
 変換後、各ファイルおよび合計のページ数を表示します。
 

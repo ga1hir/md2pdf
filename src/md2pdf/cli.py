@@ -5,6 +5,7 @@
   md2pdf --preset b5h-40x40 *.md   版面プリセット指定
   md2pdf --merge -o book.pdf *.md  複数入力を 1 つの PDF に結合
   md2pdf --watch *.md              保存時に自動再生成
+  md2pdf --start-page 21 ch02.md   ノンブルを 21 から始める（複数入力なら連番）
 
 変換後に各ファイルおよび合計のページ数を表示する。
 """
@@ -50,6 +51,9 @@ def build_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="出力ファイル名（--merge 時、または入力が 1 件のとき）")
     p.add_argument("--watch", action="store_true", help="保存時に自動再生成")
     p.add_argument("--no-page-number", action="store_true", help="ノンブルを付けない")
+    p.add_argument("--start-page", type=int, metavar="N",
+                   help="最初のページのノンブル（既定 1）。--merge なしの複数入力では"
+                        " 2 件目以降を前ファイルに続く連番にする")
     p.add_argument("--title", default="", help="PDF タイトル（メタデータ）")
     p.add_argument("--author", default="", help="PDF 著者（メタデータ）")
     p.add_argument("--list-presets", action="store_true", help="プリセット一覧を表示")
@@ -57,6 +61,8 @@ def build_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     if args.output and not args.merge and len(args.inputs) > 1:
         p.error("-o は --merge なしでは入力 1 件のときだけ指定できます"
                 "（複数入力を 1 つにまとめるなら --merge を付けてください）")
+    if args.start_page is not None and args.start_page < 1:
+        p.error("--start-page は 1 以上の整数で指定してください")
     return args
 
 
@@ -68,7 +74,11 @@ def _resolve_layout(args: argparse.Namespace):
     )
 
 
-def _convert_one(path: Path, lay, args) -> Optional[int]:
+def _page_range(pages: int, start: int) -> str:
+    return f"p.{start}" if pages == 1 else f"p.{start}–{start + pages - 1}"
+
+
+def _convert_one(path: Path, lay, args, start_page: int = 1) -> Optional[int]:
     if not path.is_file():
         print(f"エラー: ファイルが見つかりません: {path}", file=sys.stderr)
         return None
@@ -83,11 +93,15 @@ def _convert_one(path: Path, lay, args) -> Optional[int]:
 
         pages = render_passes(str(out), make, lay,
                               show_page_number=not args.no_page_number,
-                              title=args.title or path.stem, author=args.author)
+                              title=args.title or path.stem, author=args.author,
+                              start_page=start_page)
     except Exception as e:  # noqa: BLE001
         print(f"エラー: 変換に失敗しました: {path.name}: {e}", file=sys.stderr)
         return None
-    print(f"  完了: {out.name}（{pages}ページ）")
+    if args.start_page is None:
+        print(f"  完了: {out.name}（{pages}ページ）")
+    else:
+        print(f"  完了: {out.name}（{pages}ページ, {_page_range(pages, start_page)}）")
     return pages
 
 
@@ -122,11 +136,16 @@ def _convert_merged(paths: list[Path], lay, args) -> Optional[int]:
     try:
         pages = render_passes(str(out), make, lay,
                               show_page_number=not args.no_page_number,
-                              title=args.title or out.stem, author=args.author)
+                              title=args.title or out.stem, author=args.author,
+                              start_page=args.start_page or 1)
     except Exception as e:  # noqa: BLE001
         print(f"エラー: 結合 PDF の生成に失敗しました: {e}", file=sys.stderr)
         return None
-    print(f"  完了: {out.name}（合計 {pages}ページ）")
+    if args.start_page is None:
+        print(f"  完了: {out.name}（合計 {pages}ページ）")
+    else:
+        print(f"  完了: {out.name}（合計 {pages}ページ, "
+              f"{_page_range(pages, args.start_page)}）")
     return pages
 
 
@@ -139,13 +158,20 @@ def _run_once(args) -> int:
     total = 0
     ok = 0
     fail = 0
+    # --start-page 指定時は、各ファイルを前ファイルの最終ページに続く番号から始める
+    next_start = args.start_page or 1
     for path in paths:
-        pages = _convert_one(path, lay, args)
+        pages = _convert_one(path, lay, args, start_page=next_start)
         if pages is None:
             fail += 1
+            if args.start_page is not None and path is not paths[-1]:
+                print(f"警告: {path.name} の変換に失敗したため、以降のノンブルは連続しません",
+                      file=sys.stderr)
         else:
             ok += 1
             total += pages
+            if args.start_page is not None:
+                next_start += pages
     print("\n===== 結果 =====")
     print(f"成功: {ok}件  失敗: {fail}件  合計: {total}ページ")
     return 0 if fail == 0 else 1

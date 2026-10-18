@@ -664,3 +664,75 @@ def test_u_underline_continuous_when_justified():
     assert len(segs) == len(para._lines[0].atoms)
     for (_, end), (start, _) in zip(segs, segs[1:]):
         assert abs(end - start) < 1e-6
+
+
+def _three_pages() -> str:
+    return "\n\n".join(f"段落{i}。" + "本文" * 300 for i in range(6)) + "\n"
+
+
+def test_start_page_nombre_and_labels(tmp_path):
+    """--start-page: ノンブルと PDF ページラベルが指定番号から始まり、戻り値は物理ページ数。"""
+    out = tmp_path / "s.pdf"
+    pages = _convert(_three_pages(), "a4-38x35", out, start_page=21)
+    reader = PdfReader(str(out))
+    assert pages == len(reader.pages) >= 2
+    assert list(reader.page_labels) == [str(21 + i) for i in range(pages)]
+    for i, page in enumerate(reader.pages):
+        last = page.extract_text().strip().splitlines()[-1]
+        assert last.strip() == str(21 + i)
+
+
+def test_start_page_default_has_no_labels(tmp_path):
+    """既定（1 始まり）では /PageLabels を付けず、従来どおりの出力になる。"""
+    out = tmp_path / "d.pdf"
+    _convert(_three_pages(), "a4-38x35", out)
+    reader = PdfReader(str(out))
+    assert "/PageLabels" not in reader.trailer["/Root"]
+    assert reader.pages[1].extract_text().strip().splitlines()[-1].strip() == "2"
+
+
+def test_cli_start_page_chains(tmp_path):
+    """--merge なしの複数入力では 2 件目以降が前ファイルに続く番号から始まる。"""
+    from md2pdf.cli import main
+    a = tmp_path / "a.md"
+    b = tmp_path / "b.md"
+    a.write_text(_three_pages(), encoding="utf-8")
+    b.write_text("本文。\n", encoding="utf-8")
+    assert main(["--start-page", "5", str(a), str(b)]) == 0
+    n = _pages(a.with_suffix(".pdf"))
+    assert PdfReader(str(a.with_suffix(".pdf"))).page_labels[0] == "5"
+    assert PdfReader(str(b.with_suffix(".pdf"))).page_labels[0] == str(5 + n)
+
+
+def test_cli_without_start_page_does_not_chain(tmp_path):
+    """--start-page なしの複数入力は従来どおり各ファイル 1 始まり。"""
+    from md2pdf.cli import main
+    a = tmp_path / "a.md"
+    b = tmp_path / "b.md"
+    a.write_text(_three_pages(), encoding="utf-8")
+    b.write_text("本文。\n", encoding="utf-8")
+    assert main([str(a), str(b)]) == 0
+    text = PdfReader(str(b.with_suffix(".pdf"))).pages[0].extract_text()
+    assert text.strip().splitlines()[-1].strip() == "1"
+
+
+def test_cli_start_page_merge(tmp_path):
+    """--merge --start-page: 結合 PDF 全体の通し番号が指定番号から始まる。"""
+    from md2pdf.cli import main
+    a = tmp_path / "a.md"
+    b = tmp_path / "b.md"
+    for p in (a, b):
+        p.write_text("本文。\n", encoding="utf-8")
+    out = tmp_path / "m.pdf"
+    assert main(["--merge", "--start-page", "3", "-o", str(out), str(a), str(b)]) == 0
+    assert list(PdfReader(str(out)).page_labels) == ["3", "4"]
+
+
+def test_cli_start_page_invalid(tmp_path):
+    """--start-page は 1 以上。"""
+    from md2pdf.cli import main
+    a = tmp_path / "a.md"
+    a.write_text("本文。\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as e:
+        main(["--start-page", "0", str(a)])
+    assert e.value.code == 2
