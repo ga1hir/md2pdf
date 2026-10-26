@@ -33,7 +33,8 @@ def _footnote_ids(f) -> list[int]:
     """Flowable（入れ子を含む）に含まれる脚注参照 id を出現順・重複なしで返す。
 
     JParagraph は断片ごとに自分のアトムから id を求める。ListItem/Heading（.para）、
-    引用（.children）、KeepTogether（._content）、表（._cellvalues）は中身を辿る。
+    引用・キャプション付き表（.children）、KeepTogether（._content）、表（._cellvalues）は
+    中身を辿る。
     """
     ids: list[int] = []
 

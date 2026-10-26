@@ -35,6 +35,8 @@ _U_OPEN_RE = re.compile(r"^<u(\s[^>]*)?>$", re.IGNORECASE)
 _U_CLOSE_RE = re.compile(r"^</u\s*>$", re.IGNORECASE)
 _TASK_RE = re.compile(r"^\[([ xX])\]\s+")
 _ALERT_RE = re.compile(r"^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$", re.IGNORECASE)
+# 表キャプション（表1-1 / 表 1.2 / 表１－１ / Table 1 …）。表の直前にあれば表と分けない
+_TABLE_CAPTION_RE = re.compile(r"^(?:表|Table)\s*[0-9０-９]", re.IGNORECASE)
 _FONT_MAP = {
     "serif": (config.FONT_SERIF, config.FONT_SERIF_BOLD),
     "sans": (config.FONT_SANS, config.FONT_SANS_BOLD),
@@ -177,6 +179,8 @@ class Builder:
                               space_after=self.styles.body.space_after)
             if indent:
                 para = _indented(para, indent)
+            elif _TABLE_CAPTION_RE.match(self._plain_text(inline)):
+                para._table_caption = True  # 直後が表なら _table で表と結び付ける
             story.append(para)
         story.extend(blocks)
 
@@ -339,7 +343,10 @@ class Builder:
         tbl.spaceBefore = self.layout.leading * 0.4
         tbl.spaceAfter = self.layout.leading * 0.4
         tbl.hAlign = "LEFT"
-        story.append(tbl)
+        if story and getattr(story[-1], "_table_caption", False):
+            story[-1] = F.Captioned(story[-1], tbl)  # キャプションをページ末に残さない
+        else:
+            story.append(tbl)
 
     def _math_block(self, node: SyntaxTreeNode, story: list[Flowable]) -> None:
         expr = node.content.strip()

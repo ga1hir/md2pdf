@@ -264,6 +264,51 @@ class _Container(Flowable):
             ch.drawOn(c, self.indent + self.pad, y)
 
 
+class Captioned(Flowable):
+    """キャプションの段落と本体（表）を同じページに組む。
+
+    本体が分割できる位置ならキャプション＋本体の前半をこのページに置き、本体の 1 行目も
+    入らなければキャプションごと次ページへ送る（KeepTogether と違い、長い表でもページ末を
+    空けない）。前・間・後の空きは、それぞれを単独で置いたときと同じ。
+    """
+
+    def __init__(self, caption: Flowable, body: Flowable) -> None:
+        super().__init__()
+        self.caption = caption
+        self.body = body
+        self.children = [caption, body]  # 脚注 id の収集が辿る
+        self.spaceBefore = caption.getSpaceBefore()
+        self.spaceAfter = body.getSpaceAfter()
+        # Frame は隣り合う spaceAfter と spaceBefore を重ねる（overlapAttachedSpace）
+        self._gap = max(caption.getSpaceAfter(), body.getSpaceBefore())
+        self._ch = 0.0
+        self._bh = 0.0
+
+    def wrap(self, availWidth: float, availHeight: float):
+        _, self._ch = self.caption.wrap(availWidth, availHeight)
+        _, self._bh = self.body.wrap(availWidth, availHeight)
+        return availWidth, self._ch + self._gap + self._bh
+
+    def split(self, availWidth: float, availHeight: float):
+        _, ch = self.caption.wrap(availWidth, availHeight)
+        rest = availHeight - ch - self._gap
+        parts = self.body.split(availWidth, rest) if rest > 0 else []
+        if len(parts) >= 2:
+            return [Captioned(self.caption, parts[0])] + list(parts[1:])
+        frame = getattr(self, "_frame", None)
+        if frame is not None and getattr(frame, "_atTop", 0):
+            # ページ先頭でも本体の 1 行目が入らない: 切り離して通常どおり組む
+            return [self.caption, self.body]
+        return []  # キャプションだけがページ末に残る → 丸ごと次ページへ
+
+    def draw(self) -> None:
+        c = self.canv
+        self.caption.canv = c
+        self.caption.drawOn(c, 0, self._bh + self._gap)
+        self.body.canv = c
+        self.body.drawOn(c, 0, 0)
+
+
 def blockquote(children: list[Flowable], space: float) -> _Container:
     return _Container(children, indent=0.0, bar=config.COLOR_QUOTE_BAR,
                       bg=config.COLOR_QUOTE_BG, pad=5.0,

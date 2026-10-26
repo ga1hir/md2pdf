@@ -736,3 +736,111 @@ def test_cli_start_page_invalid(tmp_path):
     with pytest.raises(SystemExit) as e:
         main(["--start-page", "0", str(a)])
     assert e.value.code == 2
+
+
+# --- 表キャプション（GitHub #3） -------------------------------------------------------
+
+_TABLE = "| col A | col B |\n| --- | --- |\n"
+
+
+def _rows(n: int) -> str:
+    return "\n".join(f"| row {i} | value {i} |" for i in range(1, n + 1))
+
+
+def _page_texts(path: Path) -> list[str]:
+    import re
+    return [re.sub(r"\s", "", p.extract_text() or "") for p in PdfReader(str(path)).pages]
+
+
+def _captioned_src(n: int, caption: str = "表1-1：キャプション", rows: int = 5) -> str:
+    body = "\n\n".join(f"　短い段落{i}。" for i in range(n))
+    return f"{body}\n\n{caption}\n\n{_TABLE}{_rows(rows)}\n\n　後続の段落。\n"
+
+
+@pytest.mark.parametrize("caption", [
+    "表1-1：キャプション", "表 1.2 キャプション", "表１－１　キャプション",
+    "Table 2: Caption", "**表1-1** キャプション", "　表1-1：字下げしたキャプション",
+])
+def test_table_caption_detection(caption):
+    """「表＋番号」で始まる表直前の段落は表と 1 つの Captioned になる（GitHub #3）。"""
+    from md2pdf.render.flowables import Captioned
+    story = Builder(layout.resolve("a4-38x35")).build(f"{caption}\n\n{_TABLE}{_rows(2)}\n")
+    assert len(story) == 1 and isinstance(story[0], Captioned)
+    assert isinstance(story[0].caption, JParagraph)
+
+
+@pytest.mark.parametrize("src", [
+    f"以下に示す。\n\n{_TABLE}{_rows(2)}\n",
+    f"表示例を挙げる。\n\n{_TABLE}{_rows(2)}\n",
+    f"表1-1：キャプション\n\n別の段落。\n\n{_TABLE}{_rows(2)}\n",
+    "表1-1：表が続かない段落。\n",
+])
+def test_table_caption_not_matched(src):
+    """番号の無い段落や、表の直前でない段落は従来どおり単独で組む。"""
+    from reportlab.platypus import Table
+    from md2pdf.render.flowables import Captioned
+    story = Builder(layout.resolve("a4-38x35")).build(src)
+    assert not any(isinstance(f, Captioned) for f in story)
+    assert all(isinstance(f, (JParagraph, Table)) for f in story)
+
+
+def test_table_caption_split():
+    """ページ末にキャプションしか入らなければ丸ごと送り、表の 1 行目まで入れば一緒に分割する。"""
+    from md2pdf.render.flowables import Captioned
+    lay = layout.resolve("b5h-40x40")
+    cap = next(iter(Builder(lay).build(f"表1-1：キャプション\n\n{_TABLE}{_rows(10)}\n")))
+    assert isinstance(cap, Captioned)
+    w = lay.body_width
+    _, total = cap.wrap(w, lay.body_height)
+    _, ch = cap.caption.wrap(w, lay.body_height)
+    _, bh = cap.body.wrap(w, lay.body_height)
+    gap = max(cap.caption.getSpaceAfter(), cap.body.getSpaceBefore())
+    assert total == pytest.approx(ch + gap + bh)
+    assert cap.split(w, ch + 1.0) == []
+    head_and_row1 = ch + gap + sum(cap.body._rowHeights[:2]) + 1.0
+    parts = cap.split(w, head_and_row1)
+    assert len(parts) == 2 and isinstance(parts[0], Captioned)
+    assert parts[0].caption is cap.caption
+    assert len(parts[0].body._rowHeights) == 2  # ヘッダ＋1 行目
+
+
+@pytest.mark.parametrize("preset", ["a4-38x35", "b5h-40x40"])
+def test_table_caption_same_page_sweep(tmp_path, preset):
+    """表の位置をずらしても、キャプションは表の 1 行目と同じページに組まれる（GitHub #3）。
+
+    旧版はキャプションがページの最下行に収まり表の 1 行目が収まらない位置で、
+    キャプションだけがページ末に残り、表が次ページへ送られていた。"""
+    out = tmp_path / "cap.pdf"
+    for n in range(18, 36):
+        _convert(_captioned_src(n), preset, out)
+        pages = _page_texts(out)
+        cap = next(i for i, t in enumerate(pages) if "キャプション" in t)
+        row1 = next(i for i, t in enumerate(pages) if "row1value1" in t)
+        assert cap == row1, f"n={n}"
+        text = "".join(pages)
+        assert "row5value5" in text and "後続の段落。" in text
+
+
+def test_table_caption_long_table_not_pushed(tmp_path):
+    """長い表は丸ごと次ページへ送らず、キャプション＋前半をページ末の空きに組む。"""
+    out = tmp_path / "long.pdf"
+    _convert(_captioned_src(22, rows=40), "b5h-40x40", out)
+    pages = _page_texts(out)
+    assert "キャプション" in pages[0] and "row1value1" in pages[0]
+    assert len(pages) >= 2 and "row40value40" in pages[-1]
+    assert "colAcolB" in pages[1]  # ヘッダ行は次ページでも繰り返す
+
+
+def test_table_caption_footnote(tmp_path):
+    """キャプションと表のセルの脚注は、表がページ境界に来ても重ならずに描かれる。"""
+    out = tmp_path / "fn.pdf"
+    for n in range(20, 34):
+        src = _captioned_src(n, caption="表1-1：キャプション[^c]").replace(
+            "| row 1 | value 1 |", "| row 1[^t] | value 1 |")
+        src += "\n[^c]: きゃぷしょんのちゅう。\n[^t]: せるのちゅう。\n"
+        stats: dict = {}
+        _convert(src, "b5h-40x40", out, stats=stats)
+        assert stats["warnings"] == [], f"n={n}"
+        pages = _page_texts(out)
+        cap = next(i for i, t in enumerate(pages) if "キャプション" in t)
+        assert "きゃぷしょんのちゅう。" in pages[cap] and "せるのちゅう。" in pages[cap]
