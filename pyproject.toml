@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "md2pdf"
-version = "0.1.0"
+version = "0.2.0"
 description = "純Python・外部ツール非依存の Markdown→PDF 変換ツール（書籍ページ数確認＋受け渡し用）"
 readme = "README.md"
 requires-python = ">=3.9"
