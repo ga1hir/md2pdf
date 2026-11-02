@@ -485,7 +485,7 @@ def test_footnotes_in_list_and_blockquote_are_drawn(tmp_path):
 
 
 def test_long_url_wraps_within_line():
-    """行幅を超える URL は区切り文字の後で折り返し、ハイフンを足さない（#5）。"""
+    """行幅を超える URL は区切り文字の後で折り返し、ハイフンを足さない。"""
     lay = layout.resolve("b5h-40x40")
     url = ("https://docs.example.com/product/latest/developerguide/"
            "managed-rule-groups-use-case-and-something-very-very-long.html")
@@ -758,7 +758,7 @@ _LONG_CODE = "`example-sample-log-group-name-for-repro`"
     f"段落：同じように、項目の文の途中で長い識別子でございますね {_LONG_CODE} を開きます。\n",
 ])
 def test_long_inline_code_does_not_spread_previous_line(src):
-    """次の行の頭へ送られた長いインラインコードの前の行は、字間を広げず左寄せで組む（#4）。"""
+    """次の行の頭へ送られた長いインラインコードの前の行は、字間を広げず左寄せで組む（GitHub #4）。"""
     lay = layout.resolve("b5h-40x40")
     (f,) = Builder(lay).build(src)
     f.wrap(lay.body_width, 1e9)
@@ -773,7 +773,7 @@ def test_long_inline_code_does_not_spread_previous_line(src):
     "あ" * 39 + "Python" + "う" * 10,   # 短い欧文語を次行へ送る
 ])
 def test_justify_kept_for_kinsoku_and_short_word(src):
-    """禁則の追い出しや短い欧文語の送りで空いた行は、従来どおり両端揃え（#4）。"""
+    """禁則の追い出しや短い欧文語の送りで空いた行は、従来どおり両端揃え（GitHub #4）。"""
     lay = layout.resolve("b5h-40x40")
     para = next(f for f in Builder(lay).build(src + "\n") if isinstance(f, JParagraph))
     para.wrap(lay.body_width, 1e9)
