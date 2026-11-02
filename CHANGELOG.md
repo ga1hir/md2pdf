@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-02
+
 ### 追加
 
 - `--timestamp` で、各ページの右下（ノンブルと同じ高さ、本文の右端揃え）に PDF の作成日時を
@@ -87,6 +89,7 @@
   保存時の自動再生成（`--watch`）。
 - 日本語フォント（Noto Serif JP / Noto Sans JP / Noto Sans Mono CJK JP）を同梱。
 
-[Unreleased]: https://github.com/ga1hir/md2pdf/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ga1hir/md2pdf/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ga1hir/md2pdf/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ga1hir/md2pdf/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ga1hir/md2pdf/tree/v0.1.0
