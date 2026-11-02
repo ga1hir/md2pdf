@@ -666,6 +666,62 @@ def test_u_underline_continuous_when_justified():
         assert abs(end - start) < 1e-6
 
 
+class _TextRecorder:
+    """JParagraph.draw が置く文字列の x 位置だけを記録する偽キャンバス。"""
+
+    def __init__(self):
+        self.xs = []
+
+    def drawString(self, x, y, text):
+        self.xs.append(x)
+
+    def __getattr__(self, name):
+        return lambda *a, **k: None
+
+
+def _drawn_gaps(para, line) -> list:
+    """行を描いたときに原子の間へ実際に入った字間（pt）。ルビ・画像を含まない行に使う。"""
+    para.canv = _TextRecorder()
+    para._draw_line(line, 0.0)
+    xs = para.canv.xs
+    assert len(xs) == len(line.atoms)
+    return [xs[i + 1] - (xs[i] + a.width) for i, a in enumerate(line.atoms[:-1])]
+
+
+_LONG_CODE = "`example-sample-log-group-name-for-repro`"
+
+
+@pytest.mark.parametrize("src", [
+    f"1. 手順の項目：同じように、項目の文の途中で長い識別子 {_LONG_CODE} を開きます。\n",
+    f"段落：同じように、項目の文の途中で長い識別子でございますね {_LONG_CODE} を開きます。\n",
+])
+def test_long_inline_code_does_not_spread_previous_line(src):
+    """次の行の頭へ送られた長いインラインコードの前の行は、字間を広げず左寄せで組む（#4）。"""
+    lay = layout.resolve("b5h-40x40")
+    (f,) = Builder(lay).build(src)
+    f.wrap(lay.body_width, 1e9)
+    para = f if isinstance(f, JParagraph) else f.para
+    assert len(para._lines) == 2 and not para._lines[0].ragged  # 行の分け方は変えない
+    assert para._lines[1].atoms[0].run.bg is not None           # コードは 2 行目の頭
+    assert all(abs(g) < 1e-6 for g in _drawn_gaps(para, para._lines[0]))
+
+
+@pytest.mark.parametrize("src", [
+    "あ" * 39 + "「い」" + "う" * 10,   # 行末禁則で「を次行へ送る
+    "あ" * 39 + "Python" + "う" * 10,   # 短い欧文語を次行へ送る
+])
+def test_justify_kept_for_kinsoku_and_short_word(src):
+    """禁則の追い出しや短い欧文語の送りで空いた行は、従来どおり両端揃え（#4）。"""
+    lay = layout.resolve("b5h-40x40")
+    para = next(f for f in Builder(lay).build(src + "\n") if isinstance(f, JParagraph))
+    para.wrap(lay.body_width, 1e9)
+    line = para._lines[0]
+    assert len(line.atoms) == 39
+    gaps = _drawn_gaps(para, line)
+    assert min(gaps) > 0
+    assert abs(para.canv.xs[-1] + line.atoms[-1].width - para._width) < 1e-6  # 右端がそろう
+
+
 def _three_pages() -> str:
     return "\n\n".join(f"段落{i}。" + "本文" * 300 for i in range(6)) + "\n"
 

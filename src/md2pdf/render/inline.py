@@ -112,6 +112,11 @@ _FIT_EPS = 0.2
 # 行幅を超える単語（URL 等）の分割候補。この文字の直後で折り返す（ハイフンは足さない）。
 _WORD_BREAK_AFTER = "/.-_?&="
 
+# 両端揃えで 1 間に配る字間の上限（本文の字サイズ比）。行に入りきらない長い語（インラインコード・欧文語）を
+# 次行へ送った行は空きが大きく、配ると 1 字ごとに大きく空く。上限を超える行は左寄せのまま組む（#4）。
+# 禁則の追い出しや短い欧文語の送りで空いた行（〜0.08 字）は従来どおり両端揃え。
+_MAX_JUSTIFY_GAP = 0.1
+
 
 def _split_word(atom: _Atom, maxw: float) -> list[_Atom]:
     """行幅を超える 1 語を、区切り文字の直後 → それでも超える片は文字単位で分割する。"""
@@ -339,6 +344,9 @@ class JParagraph(Flowable):
         extra = 0.0
         if self.align == ALIGN_JUSTIFY and not line.ragged and n > 1:
             extra = max(0.0, maxw - line.width) / (n - 1)
+            if extra > _MAX_JUSTIFY_GAP * self.base_size:
+                # 字間を広げず左寄せ。ragged は立てない（_frag_atoms が強制改行として戻してしまう）
+                extra = 0.0
 
         if self.align == ALIGN_CENTER:
             x = (maxw - line.width) / 2.0
