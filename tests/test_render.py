@@ -355,6 +355,68 @@ def test_code_block_split_keeps_outer_spacing():
     assert (tail.spaceBefore, tail.spaceAfter) == (0, cb.spaceAfter)
 
 
+def test_code_block_split_no_layout_error_at_bottom_pad():
+    """行は全部入るが下の余白だけ入らない高さでも、CodeBlock.split() は [self] を返さない（GitHub #5）。
+
+    ReportLab の Frame.add() → Frame.split() → Frame.add(trySplit=0) の手順を境界の高さで総当たりする。"""
+    import io
+
+    from reportlab.pdfgen.canvas import Canvas
+    from reportlab.platypus import Frame
+
+    from md2pdf import config, fontreg
+    from md2pdf.render.flowables import _CODE_PAD, CodeBlock
+    fontreg.register_fonts()
+    lay = layout.resolve("b5h-40x40")
+    w = lay.body_width
+
+    def joined(b):
+        return [r.text for line in b._visual for r in line]
+
+    for total in range(1, 5):
+        for first, last in ((True, True), (True, False), (False, True), (False, False)):
+            lines = [[Run(f"line {i}", config.FONT_MONO, lay.font_size)] for i in range(total)]
+            cb = CodeBlock(lines, lay.font_size, lay.leading, first=first, last=last)
+            _, full = cb.wrap(w, 1e9)
+            pad_top = _CODE_PAD if first else 0.0
+            heights = {i * 0.25 for i in range(int(full / 0.25) + 1)}
+            for n in range(total + 1):
+                heights |= {pad_top + n * lay.leading + d for d in (-1e-3, 0.0, 1e-3)}
+            for h in sorted(x for x in heights if 0 < x < full):
+                canv = Canvas(io.BytesIO(), pagesize=(w, h))
+
+                def frame():
+                    return Frame(0, 0, w, h, leftPadding=0, rightPadding=0,
+                                 topPadding=0, bottomPadding=0)
+
+                fr = frame()
+                if fr.add(cb, canv):
+                    continue
+                S = fr.split(cb, canv)
+                assert cb not in S, (total, first, last, h)
+                if S:
+                    assert frame().add(S[0], canv, trySplit=0) == 1, (total, first, last, h)
+                    assert sum((joined(s) for s in S), []) == joined(cb)
+
+
+def test_code_block_at_page_bottom_moves_or_splits(tmp_path):
+    """ページ末尾で行は入るが下の余白が入らないコードブロック: 1 行なら次ページへ送り、
+    2 行以上なら最後の行を次ページへ送って変換を続ける（GitHub #5）。"""
+    lay = layout.resolve("b5h-40x40")
+    filler = "あ" * lay.chars_per_line
+
+    out = tmp_path / "one.pdf"
+    assert _convert(filler * 38 + "\n\n```\ncode\n```\n", "b5h-40x40", out) == 2
+    pages = [p.extract_text() or "" for p in PdfReader(str(out)).pages]
+    assert "code" not in pages[0] and "code" in pages[1]
+
+    out = tmp_path / "two.pdf"
+    assert _convert(filler * 37 + "\n\n```\ncodeA\ncodeB\n```\n", "b5h-40x40", out) == 2
+    pages = [p.extract_text() or "" for p in PdfReader(str(out)).pages]
+    assert "codeA" in pages[0] and "codeB" not in pages[0]
+    assert "codeB" in pages[1]
+
+
 def test_split_fragment_footnote_ids():
     """分割後の後半にある脚注参照は後半の断片に属する（#8）。"""
     lay = layout.resolve("b5h-40x40")

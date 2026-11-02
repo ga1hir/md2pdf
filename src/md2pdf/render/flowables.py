@@ -82,7 +82,9 @@ class CodeBlock(Flowable):
         avail_lines = int((availHeight - pad_top) // self.leading)
         total = len(self._visual)
         if avail_lines >= total:
-            return [self]
+            # 行は全部入るが下の余白（pad_bot）が入らない。[self] を返すと ReportLab が
+            # Splitting error(n==1) にするので、最終行を次ページへ送る（1 行なら丸ごと送る）（GitHub #5）
+            avail_lines = total - 1
         if avail_lines < 1:
             return []
         # 断片は視覚行を論理行として持つ。ReportLab が断片に wrap() を呼び直しても
