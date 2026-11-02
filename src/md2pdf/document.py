@@ -11,6 +11,7 @@ Flowable を置く時点で、その Flowable が持ち込む脚注の高さを�
 from __future__ import annotations
 
 import sys
+import time
 from copy import deepcopy
 from typing import Callable, Optional
 
@@ -135,13 +136,15 @@ class _FootnoteFrame(Frame):
 class MdDocTemplate(BaseDocTemplate):
     def __init__(self, filename: str, layout: Layout, builder: Builder,
                  show_page_number: bool = True, title: str = "",
-                 author: str = "", start_page: int = 1) -> None:
+                 author: str = "", start_page: int = 1, timestamp: bool = False) -> None:
         x, y, w, h = layout.frame
         page_w, page_h = layout.page_size
         self.layout = layout
         self.builder = builder
         self.show_page_number = show_page_number
         self.start_page = start_page           # 1 ページ目のノンブル（章単位の分割出力用）
+        self.timestamp = timestamp             # 右下に PDF 作成日時を入れる
+        self._source_mtime: Optional[float] = None  # 右下に出す原稿の更新日時（SourceDate が設定）
         self._page_fn_ids: list[int] = []      # このページで参照された脚注 id
         self._carry_fn: list[int] = []         # 前ページから繰り越した脚注 id
         self._fn_cache: dict[int, tuple[JParagraph, float]] = {}
@@ -254,6 +257,7 @@ class MdDocTemplate(BaseDocTemplate):
         self._carry_fn = leftover
         self._page_fn_ids = []
         self._draw_page_number(canvas)
+        self._draw_stamps(canvas)
 
     def _has_overflow_pending(self) -> bool:
         return bool(self._band(self._pending_ids())[1])
@@ -270,6 +274,30 @@ class MdDocTemplate(BaseDocTemplate):
         canvas.setFillColor(config.COLOR_PAGE_NUMBER)
         canvas.drawCentredString(page_w / 2.0, self._nombre_baseline(),
                                  str(self.start_page + canvas.getPageNumber() - 1))
+
+    def _draw_stamps(self, canvas) -> None:
+        """原稿の更新日時と PDF 作成日時を本文ブロックの右端揃えで描く。
+
+        最下行をノンブルと同じ高さにして上へ積む（両方なら上が原稿更新、下が出力の 2 行）。
+        """
+        lines: list[str] = []
+        if self._source_mtime is not None:
+            lines.append(time.strftime("原稿更新: %Y-%m-%d %H:%M",
+                                       time.localtime(self._source_mtime)))
+        if self.timestamp:
+            # /CreationDate と同じ ReportLab の TimeStamp を使い、メタデータと紙面の日時を一致させる
+            # （SOURCE_DATE_EPOCH があればその値の UTC になる）。公開 API がないため非公開属性を読む
+            lines.append("出力: %04d-%02d-%02d %02d:%02d" % canvas._doc._timeStamp.YMDhms[:5])
+        if not lines:
+            return
+        x, _, w, _ = self.layout.frame
+        size = self.layout.font_size * 0.7
+        canvas.setFont(config.FONT_SANS, size)
+        canvas.setFillColor(config.COLOR_PAGE_NUMBER)
+        y = self._nombre_baseline()
+        for text in reversed(lines):
+            canvas.drawRightString(x + w, y, text)
+            y += size * 1.25
 
     def _draw_footnotes(self, canvas, taken: list[tuple[JParagraph, float]]) -> float:
         """脚注を帯（本文ブロック下部〜ノンブル直上）に下詰めで描き、区切り罫の y を返す。"""
@@ -295,6 +323,22 @@ class MdDocTemplate(BaseDocTemplate):
         return rule_y
 
 
+class SourceDate(ActionFlowable):
+    """以降のページの右下に出す原稿の更新日時（mtime）を切り替える番兵。
+
+    大きさを持たず配置もされないので、版面とページ数は変わらない。--merge では各ファイルの
+    先頭（改ページの直後）に置く。ReportLab はページ開始を次の flowable の直前まで遅らせるため、
+    改ページ直後の番兵は新しいページに効く。
+    """
+
+    def __init__(self, mtime: float) -> None:
+        ActionFlowable.__init__(self)
+        self.mtime = mtime
+
+    def apply(self, doc) -> None:
+        doc._source_mtime = self.mtime
+
+
 class _CondPageBreak(ActionFlowable):
     """脚注が予約帯に収まらず繰り越しが残る場合だけ改ページする番兵（末尾掃き出し用）。"""
 
@@ -310,11 +354,11 @@ class _CondPageBreak(ActionFlowable):
 def render_passes(filename: str, make_story: Callable[[], "tuple[list, Builder]"],
                   layout: Layout, show_page_number: bool = True, title: str = "",
                   author: str = "", stats: Optional[dict] = None,
-                  start_page: int = 1) -> int:
+                  start_page: int = 1, timestamp: bool = False) -> int:
     """PDF 化して総ページ数を返す。
 
     start_page は 1 ページ目のノンブル（PDF のページラベルにも反映）。戻り値は
-    start_page によらず物理ページ数。
+    start_page によらず物理ページ数。timestamp=True なら各ページ右下に作成日時を入れる。
 
     脚注は本文を置く時点で予約するため 1 パスで確定する（make_story() は 1 回だけ呼ぶ。
     名前と引数は従来の反復版との互換のため）。stats を渡すとページごとの予約・必要高・
@@ -323,7 +367,7 @@ def render_passes(filename: str, make_story: Callable[[], "tuple[list, Builder]"
     fontreg.register_fonts()
     story, builder = make_story()
     doc = MdDocTemplate(filename, layout, builder, show_page_number, title, author,
-                        start_page=start_page)
+                        start_page=start_page, timestamp=timestamp)
     flowables = list(story)
     if builder.footnotes:
         flowables += [_CondPageBreak(doc) for _ in range(len(builder.footnotes) + 1)]
@@ -357,7 +401,8 @@ def render_passes(filename: str, make_story: Callable[[], "tuple[list, Builder]"
 
 def render_to_pdf(filename: str, story: list, layout: Layout, builder: Builder,
                   show_page_number: bool = True, title: str = "",
-                  author: str = "", start_page: int = 1) -> int:
+                  author: str = "", start_page: int = 1, timestamp: bool = False) -> int:
     """単一の (story, builder) を用いる薄いラッパ。"""
     return render_passes(filename, lambda: (story, builder), layout,
-                         show_page_number, title, author, start_page=start_page)
+                         show_page_number, title, author, start_page=start_page,
+                         timestamp=timestamp)

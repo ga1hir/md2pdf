@@ -6,6 +6,8 @@
   md2pdf --merge -o book.pdf *.md  複数入力を 1 つの PDF に結合
   md2pdf --watch *.md              保存時に自動再生成
   md2pdf --start-page 21 ch02.md   ノンブルを 21 から始める（複数入力なら連番）
+  md2pdf --timestamp input.md      右下に PDF 作成日時を入れる
+  md2pdf --source-date input.md    右下に原稿 Markdown の更新日時を入れる
 
 変換後に各ファイルおよび合計のページ数を表示する。
 """
@@ -20,7 +22,7 @@ from typing import Optional
 
 from . import layout as layoutmod
 from .builder import Builder
-from .document import render_passes
+from .document import SourceDate, render_passes
 from .layout import PRESETS
 
 
@@ -51,6 +53,11 @@ def build_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="出力ファイル名（--merge 時、または入力が 1 件のとき）")
     p.add_argument("--watch", action="store_true", help="保存時に自動再生成")
     p.add_argument("--no-page-number", action="store_true", help="ノンブルを付けない")
+    p.add_argument("--timestamp", action="store_true",
+                   help="PDF の作成日時を右下に入れる（出力: YYYY-MM-DD HH:MM）")
+    p.add_argument("--source-date", action="store_true",
+                   help="原稿 Markdown の更新日時を右下に入れる（原稿更新: YYYY-MM-DD HH:MM）。"
+                        "--timestamp と併用すると 2 行になる")
     p.add_argument("--start-page", type=int, metavar="N",
                    help="最初のページのノンブル（既定 1）。--merge なしの複数入力では"
                         " 2 件目以降を前ファイルに続く連番にする")
@@ -89,12 +96,15 @@ def _convert_one(path: Path, lay, args, start_page: int = 1) -> Optional[int]:
 
         def make():
             b = Builder(lay, base_dir=str(path.resolve().parent))
-            return b.build(text), b
+            story = b.build(text)
+            if args.source_date:
+                story.insert(0, SourceDate(path.stat().st_mtime))
+            return story, b
 
         pages = render_passes(str(out), make, lay,
                               show_page_number=not args.no_page_number,
                               title=args.title or path.stem, author=args.author,
-                              start_page=start_page)
+                              start_page=start_page, timestamp=args.timestamp)
     except Exception as e:  # noqa: BLE001
         print(f"エラー: 変換に失敗しました: {path.name}: {e}", file=sys.stderr)
         return None
@@ -129,6 +139,9 @@ def _convert_merged(paths: list[Path], lay, args) -> Optional[int]:
             new_flowables = b.build(path.read_text(encoding="utf-8"))
             for fl in new_flowables:
                 fl._src_file = path.name  # エラー時にどのファイル由来か特定するため
+            if args.source_date:
+                # ページごとにそのページの原稿の更新日時を出すため、各ファイルの先頭で切り替える
+                story.append(SourceDate(path.stat().st_mtime))
             story.extend(new_flowables)
             b.next_file()
         return story, b
@@ -137,7 +150,7 @@ def _convert_merged(paths: list[Path], lay, args) -> Optional[int]:
         pages = render_passes(str(out), make, lay,
                               show_page_number=not args.no_page_number,
                               title=args.title or out.stem, author=args.author,
-                              start_page=args.start_page or 1)
+                              start_page=args.start_page or 1, timestamp=args.timestamp)
     except Exception as e:  # noqa: BLE001
         print(f"エラー: 結合 PDF の生成に失敗しました: {e}", file=sys.stderr)
         return None

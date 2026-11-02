@@ -738,6 +738,196 @@ def test_cli_start_page_invalid(tmp_path):
     assert e.value.code == 2
 
 
+# --- 作成日時・原稿更新日時（--timestamp / --source-date） ----------------------------------
+
+_EPOCH = 1793612345  # SOURCE_DATE_EPOCH で日時を固定（ReportLab は UTC で扱う）
+_MTIME_A = 1790000000
+_MTIME_B = 1791000000
+
+
+def _stamp_text() -> str:
+    import time
+    return time.strftime("出力: %Y-%m-%d %H:%M", time.gmtime(_EPOCH))
+
+
+def _source_text(mtime: float) -> str:
+    import time
+    return time.strftime("原稿更新: %Y-%m-%d %H:%M", time.localtime(mtime))
+
+
+def _stamp_positions(page, label: str = "出力") -> list[tuple[float, float]]:
+    pos: list[tuple[float, float]] = []
+
+    def visit(text, cm, tm, font_dict, font_size):
+        if label in text:
+            pos.append((cm[0] * tm[4] + cm[2] * tm[5] + cm[4],
+                        cm[1] * tm[4] + cm[3] * tm[5] + cm[5]))
+
+    page.extract_text(visitor_text=visit)
+    return pos
+
+
+def _convert_with_source(src: str, preset: str, out: Path, mtime: float, **kw) -> int:
+    from md2pdf.document import SourceDate
+    lay = layout.resolve(preset)
+
+    def make():
+        b = Builder(lay)
+        return [SourceDate(mtime)] + b.build(src), b
+
+    return render_passes(str(out), make, lay, **kw)
+
+
+def _footnote_src() -> str:
+    body = "\n\n".join(f"段落{i}。" + "本文" * 200 + (f"参照[^{i}]。" if i % 2 == 0 else "")
+                       for i in range(8))
+    notes = "\n\n".join(f"[^{i}]: 脚注{i}。" + "説明" * 40 for i in range(0, 8, 2))
+    return body + "\n\n" + notes + "\n"
+
+
+def _long_first_para() -> str:
+    """最初の段落が 1 ページに収まらない原稿（--merge で 2 件目の先頭ページが断片だけになる）。"""
+    return "冒頭" + "本文" * 800 + "\n\n" + _three_pages()
+
+
+@pytest.mark.parametrize("preset", ["a4-38x35", "b5h-40x40"])
+def test_timestamp_bottom_right(tmp_path, monkeypatch, preset):
+    """--timestamp: 全ページ右下（ノンブルと同じ高さ・中央より右）に作成日時が入り、メタデータと一致する。"""
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", str(_EPOCH))
+    out = tmp_path / "t.pdf"
+    _convert(_three_pages(), preset, out, timestamp=True)
+    reader = PdfReader(str(out))
+    lay = layout.resolve(preset)
+    x, y, w, _ = lay.frame
+    page_w, _ = lay.page_size
+    assert len(reader.pages) >= 2
+    for page in reader.pages:
+        assert _stamp_text() in page.extract_text()
+        pos = _stamp_positions(page)
+        assert len(pos) == 1
+        sx, sy = pos[0]
+        assert page_w / 2 < sx < x + w
+        assert abs(sy - max(14.0, y * 0.45)) < 0.5
+    created = reader.metadata.creation_date.strftime("出力: %Y-%m-%d %H:%M")
+    assert created == _stamp_text()
+
+
+@pytest.mark.parametrize("preset", ["a4-38x35", "b5h-40x40"])
+def test_source_date_bottom_right(tmp_path, preset):
+    """SourceDate のみ: 原稿の更新日時がノンブルと同じ高さの右下に 1 行で入る。"""
+    out = tmp_path / "s.pdf"
+    _convert_with_source(_three_pages(), preset, out, _MTIME_A)
+    lay = layout.resolve(preset)
+    x, y, w, _ = lay.frame
+    page_w, _ = lay.page_size
+    reader = PdfReader(str(out))
+    assert len(reader.pages) >= 2
+    for page in reader.pages:
+        assert _source_text(_MTIME_A) in page.extract_text()
+        assert "出力:" not in page.extract_text()
+        (sx, sy), = _stamp_positions(page, "原稿更新")
+        assert page_w / 2 < sx < x + w
+        assert abs(sy - max(14.0, y * 0.45)) < 0.5
+
+
+@pytest.mark.parametrize("preset", ["a4-38x35", "b5h-40x40"])
+def test_stamps_two_lines(tmp_path, monkeypatch, preset):
+    """両方指定: 下の行（ノンブルの高さ）が出力、上の行が原稿更新。右端は本文の右端に揃い、本文ブロックより下。"""
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    from md2pdf import config
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", str(_EPOCH))
+    out = tmp_path / "b.pdf"
+    _convert_with_source(_three_pages(), preset, out, _MTIME_A, timestamp=True)
+    lay = layout.resolve(preset)
+    x, y, w, _ = lay.frame
+    size = lay.font_size * 0.7
+    base = max(14.0, y * 0.45)
+    for page in PdfReader(str(out)).pages:
+        (ox, oy), = _stamp_positions(page, "出力")
+        (sx, sy), = _stamp_positions(page, "原稿更新")
+        assert abs(oy - base) < 0.5
+        assert abs(sy - (base + size * 1.25)) < 0.5
+        assert sy + size < y
+        for left, text in ((ox, _stamp_text()), (sx, _source_text(_MTIME_A))):
+            assert abs(left + stringWidth(text, config.FONT_SANS, size) - (x + w)) < 0.5
+
+
+@pytest.mark.parametrize("preset", ["a4-38x35", "b5h-40x40"])
+@pytest.mark.parametrize("kind", ["grid", "footnotes"])
+def test_stamps_keep_page_count(tmp_path, preset, kind):
+    """作成日時・原稿更新日時は余白に描くだけなので、ページ数は変わらない（脚注ありも）。"""
+    if kind == "grid":
+        src = (ASSETS / "test_38x35.md").read_text(encoding="utf-8")
+    else:
+        src = _footnote_src()
+    plain = _convert(src, preset, tmp_path / "p.pdf")
+    stamped = _convert_with_source(src, preset, tmp_path / "s.pdf", _MTIME_A, timestamp=True)
+    assert plain == stamped
+
+
+def test_timestamp_off_by_default(tmp_path):
+    """既定では作成日時も原稿更新日時も入れない。"""
+    out = tmp_path / "d.pdf"
+    _convert(_three_pages(), "a4-38x35", out)
+    for page in PdfReader(str(out)).pages:
+        assert "出力:" not in page.extract_text()
+        assert "原稿更新:" not in page.extract_text()
+
+
+def test_cli_timestamp(tmp_path, monkeypatch):
+    """CLI の --timestamp。--no-page-number と併用しても日時は入る。"""
+    from md2pdf.cli import main
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", str(_EPOCH))
+    a = tmp_path / "a.md"
+    a.write_text("本文。\n", encoding="utf-8")
+    assert main(["--timestamp", "--no-page-number", str(a)]) == 0
+    text = PdfReader(str(a.with_suffix(".pdf"))).pages[0].extract_text()
+    assert _stamp_text() in text
+    assert text.strip().splitlines()[-1].strip() != "1"
+
+
+def test_cli_source_date_separate_files(tmp_path):
+    """--merge なしの複数入力: 各 PDF にそれぞれの原稿の更新日時が入る。"""
+    import os
+    from md2pdf.cli import main
+    a = tmp_path / "a.md"
+    b = tmp_path / "b.md"
+    for p, t in ((a, _MTIME_A), (b, _MTIME_B)):
+        p.write_text(_three_pages(), encoding="utf-8")
+        os.utime(p, (t, t))
+    assert main(["--source-date", str(a), str(b)]) == 0
+    for p, t in ((a, _MTIME_A), (b, _MTIME_B)):
+        for page in PdfReader(str(p.with_suffix(".pdf"))).pages:
+            assert _source_text(t) in page.extract_text()
+
+
+def test_merge_source_date_per_file(tmp_path, monkeypatch):
+    """--merge: 各ページにそのページの原稿の更新日時が入る。2 件目が 1 ページに収まらない段落で
+    始まっても（先頭ページが分割の断片だけでも）切り替わる。ページ数はオプションなしと同じ。"""
+    import os
+    from md2pdf.cli import main
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", str(_EPOCH))
+    a = tmp_path / "a.md"
+    b = tmp_path / "b.md"
+    a.write_text(_three_pages(), encoding="utf-8")
+    b.write_text(_long_first_para(), encoding="utf-8")
+    for p, t in ((a, _MTIME_A), (b, _MTIME_B)):
+        os.utime(p, (t, t))
+    n_a = _convert(_three_pages(), "a4-38x35", tmp_path / "a_only.pdf")
+    plain = tmp_path / "plain.pdf"
+    out = tmp_path / "m.pdf"
+    assert main(["--merge", "-o", str(plain), str(a), str(b)]) == 0
+    assert main(["--merge", "--source-date", "--timestamp", "-o", str(out), str(a), str(b)]) == 0
+    pages = PdfReader(str(out)).pages
+    assert len(pages) == _pages(plain) > n_a + 1
+    for i, page in enumerate(pages):
+        text = page.extract_text()
+        want, other = (_MTIME_A, _MTIME_B) if i < n_a else (_MTIME_B, _MTIME_A)
+        assert _source_text(want) in text, i
+        assert _source_text(other) not in text, i
+        assert _stamp_text() in text
+
+
 # --- 表キャプション（GitHub #3） -------------------------------------------------------
 
 _TABLE = "| col A | col B |\n| --- | --- |\n"
