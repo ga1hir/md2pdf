@@ -117,6 +117,27 @@ _WORD_BREAK_AFTER = "/.-_?&="
 # 禁則の追い出しや短い欧文語の送りで空いた行（〜0.08 字）は従来どおり両端揃え。
 _MAX_JUSTIFY_GAP = 0.1
 
+# 行頭禁則の追い込みで 1 間から詰める字間の上限（本文の字サイズ比。_MAX_JUSTIFY_GAP と同じく 0.1 字）。
+# 本文は 1 字はみ出しても 1 間 0.025 字（40 字詰め）なので必ず追い込む。超えるのは狭い表セル等の
+# 短い行だけで、そのときは前の字といっしょに次行へ送る（追い出し。GitHub #6）。
+_MAX_SQUEEZE_GAP = 0.1
+
+
+def _no_line_start(atom: _Atom) -> bool:
+    return atom.kind == "cjk" and kinsoku.cannot_start_line(atom.text)
+
+
+def _fit_body(atoms: list[_Atom], width: float, maxw: float) -> tuple[int, float]:
+    """行幅に収める部分の原子数と幅。行幅を超えた行の末尾の句読点 1 字はぶら下げとして除く。
+
+    行分割（追い込めるかの判定）と描画（詰める量）の両方で使い、両者の判定を一致させる。
+    """
+    n = len(atoms)
+    if width > maxw + _FIT_EPS and n and atoms[-1].kind == "cjk" \
+            and kinsoku.can_hang(atoms[-1].text):
+        return n - 1, width - atoms[-1].width
+    return n, width
+
 
 def _split_word(atom: _Atom, maxw: float) -> list[_Atom]:
     """行幅を超える 1 語を、区切り文字の直後 → それでも超える片は文字単位で分割する。"""
@@ -175,7 +196,8 @@ def _frag_atoms(lines: list[_Line]) -> list[_Atom]:
     return out
 
 
-def _break_lines(atoms: list[_Atom], maxw: float) -> list[_Line]:
+def _break_lines(atoms: list[_Atom], maxw: float, max_squeeze: float) -> list[_Line]:
+    """行に分ける。max_squeeze は行頭禁則の追い込みで 1 間から詰めてよい字間（pt）。"""
     atoms = _split_long_words(atoms, maxw)
     lines: list[_Line] = []
     cur: list[_Atom] = []
@@ -209,10 +231,32 @@ def _break_lines(atoms: list[_Atom], maxw: float) -> list[_Line]:
             continue
 
         # 折り返しが必要
-        if atom.kind == "cjk" and kinsoku.cannot_start_line(atom.text):
-            # 行頭禁則 → 追い込み（多少のはみ出しを許して現在行に残す）
-            cur.append(atom)
-            curw += w
+        if _no_line_start(atom):
+            # 行頭禁則 → 現在行に残す。句読点はぶら下げ、他は描画時に字間を詰めて行幅に収める（追い込み）
+            n_body, body_w = _fit_body(cur + [atom], curw + w, maxw)
+            over = body_w - maxw
+            if over <= _FIT_EPS or (n_body > 1 and over / (n_body - 1) <= max_squeeze):
+                cur.append(atom)
+                curw += w
+                continue
+            # 詰めきれない短い行 → 追い出し: 行頭に立てる字まで戻し、その前の開き括弧等もいっしょに送る
+            k = len(cur) - 1
+            while k > 0 and _no_line_start(cur[k]):
+                k -= 1
+            while k > 0 and cur[k - 1].kind == "cjk" and kinsoku.cannot_end_line(cur[k - 1].text):
+                k -= 1
+            if k == 0:
+                # 送ると行が空になる（行頭に立てる字がない）→ 送らずに残す（詰めは描画時に上限まで）
+                cur.append(atom)
+                curw += w
+                continue
+            moved = cur[k:] + [atom]
+            del cur[k:]
+            flush(ragged=False)
+            while moved and moved[0].kind == "space":
+                moved.pop(0)  # 空白位置での折り返し。行頭の空白は捨てる
+            cur = moved
+            curw = sum(a.width for a in cur)
             continue
 
         # 行末禁則 → 末尾の開き括弧等を次行へ送る
@@ -275,7 +319,8 @@ class JParagraph(Flowable):
         if self._lines and availWidth == self._width:
             return availWidth, len(self._lines) * self.leading
         self._width = availWidth
-        self._lines = _break_lines(self._atoms, availWidth)
+        self._lines = _break_lines(self._atoms, availWidth,
+                                   _MAX_SQUEEZE_GAP * self.base_size)
         if self._continues:
             self._lines[-1].ragged = False  # 次ページへ続く最終行は均等割り付けを保つ
         return availWidth, len(self._lines) * self.leading
@@ -340,22 +385,29 @@ class JParagraph(Flowable):
         maxw = self._width
         atoms = line.atoms
         n = len(atoms)
-        # 均等割り付け（両端揃え）の余白を算出
+        # 行幅に収める部分（行末のぶら下げ句読点を除く）。字間はこの部分の原子間にだけ入れる
+        n_body, body_w = _fit_body(atoms, line.width, maxw)
         extra = 0.0
-        if self.align == ALIGN_JUSTIFY and not line.ragged and n > 1:
-            extra = max(0.0, maxw - line.width) / (n - 1)
+        if n_body > 1 and body_w > maxw + _FIT_EPS:
+            # 行頭禁則の追い込み: 揃えによらず字間を詰めて行幅に収める（GitHub #6）
+            extra = max((maxw - body_w) / (n_body - 1), -_MAX_SQUEEZE_GAP * self.base_size)
+        elif self.align == ALIGN_JUSTIFY and not line.ragged and n_body > 1:
+            # 均等割り付け（両端揃え）の余白を算出
+            extra = max(0.0, maxw - body_w) / (n_body - 1)
             if extra > _MAX_JUSTIFY_GAP * self.base_size:
                 # 字間を広げず左寄せ。ragged は立てない（_frag_atoms が強制改行として戻してしまう）
                 extra = 0.0
+        body_w += extra * max(0, n_body - 1)
 
         if self.align == ALIGN_CENTER:
-            x = (maxw - line.width) / 2.0
+            x = (maxw - body_w) / 2.0
         elif self.align == ALIGN_RIGHT:
-            x = maxw - line.width
+            x = maxw - body_w
         else:
             x = 0.0
 
         for idx, atom in enumerate(atoms):
+            gap = extra if idx < n_body - 1 else 0.0  # ぶら下げ句読点の前には字間を入れない
             run = atom.run
             size = run.size * (0.7 if run.sup else 1.0)
             y = baseline + (run.size * 0.34 if run.sup else 0.0)
@@ -397,10 +449,10 @@ class JParagraph(Flowable):
 
             # 下線（リンク・<u>）＋リンク注釈
             if run.underline and atom.text:
-                # 両端揃えの字間 extra も、次の原子が下線付きなら引いて線を途切れさせない
+                # 両端揃え・追い込みの字間 gap も、次の原子が下線付きなら足して線を途切れさせない
                 uw = atom.width
                 if idx < n - 1 and atoms[idx + 1].run.underline and atoms[idx + 1].text:
-                    uw += extra
+                    uw += gap
                 c.setStrokeColor(run.color)
                 c.setLineWidth(0.5)
                 c.line(x, baseline - 1.2, x + uw, baseline - 1.2)
@@ -408,6 +460,4 @@ class JParagraph(Flowable):
                 c.linkURL(run.link, (x, baseline - 2, x + atom.width, baseline + size),
                           relative=0, thickness=0)
 
-            x += atom.width
-            if idx < n - 1:
-                x += extra
+            x += atom.width + gap

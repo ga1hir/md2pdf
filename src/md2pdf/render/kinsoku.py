@@ -15,6 +15,11 @@ def cannot_start_line(ch: str) -> bool:
     return ch in config.KINSOKU_NOT_LINE_START
 
 
+def can_hang(ch: str) -> bool:
+    """ぶら下げ可: 行末で行の幅の外へ出してよい句読点。"""
+    return ch in config.KINSOKU_HANGING
+
+
 def cannot_end_line(ch: str) -> bool:
     """行末禁則: 開き括弧など、行の末尾に来てはならない文字。"""
     return ch in config.KINSOKU_NOT_LINE_END

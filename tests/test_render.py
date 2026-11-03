@@ -784,6 +784,91 @@ def test_justify_kept_for_kinsoku_and_short_word(src):
     assert abs(para.canv.xs[-1] + line.atoms[-1].width - para._width) < 1e-6  # 右端がそろう
 
 
+def _line_text(line) -> str:
+    return "".join(a.text for a in line.atoms)
+
+
+_KINSOKU_TABLE = """| 項目 | 名前 | 説明 |
+| --- | --- | --- |
+| 社内の開発用のアップデーター | a | b |
+| 開発用のサーバーのアップデーター | a | b |
+| 社内の開発用のアップデータ。 | a | b |
+"""
+
+
+def test_kinsoku_squeezed_into_table_cell():
+    """表のセルの行末に来た行頭禁則の「ー」は、字間を詰めてセルの幅に収める。句読点はぶら下げ（GitHub #6）。"""
+    from reportlab.platypus import Table
+    lay = layout.resolve("b5h-40x40")
+    (tbl,) = [f for f in Builder(lay).build(_KINSOKU_TABLE) if isinstance(f, Table)]
+    tbl.wrap(lay.body_width, 1e9)
+    cells = [row[0][0] for row in tbl._cellvalues[1:]]  # wrap 後のセルは _ExpandedCellTuple
+    assert [[_line_text(line) for line in c._lines] for c in cells] == [  # 改行位置は変えない
+        ["社内の開発用のアップデーター"],
+        ["開発用のサーバーのアップデー", "ター"],
+        ["社内の開発用のアップデータ。"],
+    ]
+    for c in cells[:2]:
+        line = c._lines[0]
+        gaps = _drawn_gaps(c, line)
+        assert max(gaps) < 0 and max(gaps) - min(gaps) < 1e-6  # 均等に詰める
+        assert abs(c.canv.xs[-1] + line.atoms[-1].width - c._width) < 1e-6  # 右端がセルの幅にそろう
+    c = cells[2]
+    line = c._lines[0]
+    assert all(abs(g) < 1e-6 for g in _drawn_gaps(c, line))  # 詰めない
+    assert c.canv.xs[-1] + line.atoms[-1].width > c._width  # 「。」はぶら下げ
+
+
+@pytest.mark.parametrize("align", ["left", "center", "right", "justify"])
+def test_kinsoku_squeeze_fits_line_in_any_align(align):
+    """本文の行頭禁則の追い込みも、揃えによらず行の幅に収める。改行位置は変えない（GitHub #6）。"""
+    lay = layout.resolve("b5h-40x40")
+    Builder(lay)  # フォント登録
+    para = JParagraph([Run("あ" * 40 + "ー" + "う" * 5, size=lay.font_size)], lay.leading,
+                      align=align, base_size=lay.font_size)
+    para.wrap(lay.body_width, 1e9)
+    line = para._lines[0]
+    assert len(line.atoms) == 41
+    gaps = _drawn_gaps(para, line)
+    assert max(gaps) < 0 and max(gaps) - min(gaps) < 1e-6
+    assert abs(para.canv.xs[0]) < 1e-6
+    assert abs(para.canv.xs[-1] + line.atoms[-1].width - para._width) < 1e-6
+
+
+def test_kinsoku_punct_hangs_in_body():
+    """本文の行末の句読点は従来どおりぶら下げる: 字間を詰めず、本文の幅の外に置く（GitHub #6）。"""
+    lay = layout.resolve("b5h-40x40")
+    para = next(f for f in Builder(lay).build("あ" * 40 + "。" + "う" * 5 + "\n")
+                if isinstance(f, JParagraph))
+    para.wrap(lay.body_width, 1e9)
+    line = para._lines[0]
+    assert len(line.atoms) == 41
+    assert all(abs(g) < 1e-6 for g in _drawn_gaps(para, line))
+    assert abs(para.canv.xs[-1] - para._width) < 1e-6
+
+
+@pytest.mark.parametrize("text, lines", [
+    ("あいうえー", ["あいう", "えー"]),       # 前の字といっしょに送る（追い出し）
+    ("あい「うー」", ["あい", "「うー」"]),   # その前の開き括弧も送る
+    ("あいうえ。", ["あいうえ。"]),           # 句読点はぶら下げ
+    ("ーーーーー", ["ーーーーー"]),           # 行頭に立てる字がない → 送らずに残す
+])
+def test_kinsoku_push_out_in_narrow_line(text, lines):
+    """詰めが 1 間 0.1 字を超える短い行（狭い表セル等）は、追い込まずに追い出す（GitHub #6）。"""
+    Builder(layout.resolve("b5h-40x40"))  # フォント登録
+    para = JParagraph([Run(text, size=10.0)], 14.0, base_size=10.0)
+    para.wrap(40.0, 1e9)  # 4 字幅
+    assert [_line_text(line) for line in para._lines] == lines
+
+
+def test_kinsoku_squeeze_capped_when_nothing_to_push():
+    """送れずに残した行も、字間の詰めは 1 間 0.1 字で止める（字が重ならない）（GitHub #6）。"""
+    Builder(layout.resolve("b5h-40x40"))  # フォント登録
+    para = JParagraph([Run("ー" * 5, size=10.0)], 14.0, base_size=10.0)
+    para.wrap(40.0, 1e9)
+    assert all(abs(g + 1.0) < 1e-6 for g in _drawn_gaps(para, para._lines[0]))
+
+
 def _three_pages() -> str:
     return "\n\n".join(f"段落{i}。" + "本文" * 300 for i in range(6)) + "\n"
 
