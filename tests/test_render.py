@@ -869,6 +869,71 @@ def test_kinsoku_squeeze_capped_when_nothing_to_push():
     assert all(abs(g + 1.0) < 1e-6 for g in _drawn_gaps(para, para._lines[0]))
 
 
+class _RectRecorder(_TextRecorder):
+    """JParagraph.draw が描く背景の枠（左右端）と文字列の x 位置を記録する偽キャンバス。"""
+
+    def __init__(self):
+        super().__init__()
+        self.rects = []
+
+    def roundRect(self, x, y, w, h, r, stroke=1, fill=1):
+        self.rects.append((x, x + w))
+
+
+def _code_boxes(para, line) -> list:
+    """行を描いたときのインラインコードの枠と、各枠が覆うべき範囲（コードの原子の左端〜右端 ± pad）。"""
+    para.canv = _RectRecorder()
+    para._draw_line(line, 0.0)
+    xs = para.canv.xs
+    assert len(xs) == len(line.atoms)
+    code = [i for i, a in enumerate(line.atoms) if a.run.bg is not None]
+    pad = line.atoms[code[0]].run.size * 0.12
+    return para.canv.rects, (xs[code[0]] - pad, xs[code[-1]] + line.atoms[code[-1]].width + pad)
+
+
+@pytest.mark.parametrize("src", [
+    "　一覧は、コマンド `ls -l /tmp` で確かめます。\n",   # 空白を含む
+    "　置き換える値は `<ファイル名>` です。\n",            # 和文を含む
+    "　空白のないコードは `ls` のように1つの枠になります。\n",
+])
+def test_inline_code_bg_one_box(src):
+    """空白や和文を含むインラインコードも、背景は語・字ごとに分けず 1 つの枠で描く（GitHub #7）。"""
+    lay = layout.resolve("a4-38x35")
+    para = next(f for f in Builder(lay).build(src) if isinstance(f, JParagraph))
+    para.wrap(lay.body_width, 1e9)
+    (line,) = para._lines
+    rects, span = _code_boxes(para, line)
+    assert len(rects) == 1
+    assert all(abs(a - b) < 1e-6 for a, b in zip(rects[0], span))
+
+
+def test_inline_code_bg_box_per_line():
+    """行をまたぐインラインコードは、行ごとに 1 つの枠。両端揃えの字間も枠に含める（GitHub #7）。"""
+    lay = layout.resolve("a4-38x35")
+    para = next(f for f in Builder(lay).build("あ" * 34 + "`ls -l /tmp`です。\n")
+                if isinstance(f, JParagraph))
+    para.wrap(lay.body_width, 1e9)
+    first, second = para._lines
+    # 前提: コードの中の空白で折り返し、1 行目は両端揃えで字間が入る
+    assert _line_text(first).endswith("ls -l") and _line_text(second).startswith("/tmp")
+    assert not first.ragged and min(_drawn_gaps(para, first)) > 0
+    for line in (first, second):
+        rects, span = _code_boxes(para, line)
+        assert len(rects) == 1
+        assert all(abs(a - b) < 1e-6 for a, b in zip(rects[0], span))
+
+
+def test_inline_code_bg_separate_spans():
+    """別々のインラインコードは、同じ行にあってもそれぞれの枠で描く（GitHub #7）。"""
+    lay = layout.resolve("a4-38x35")
+    para = next(f for f in Builder(lay).build("`ls -l` と `<ファイル名>` を使う。\n")
+                if isinstance(f, JParagraph))
+    para.wrap(lay.body_width, 1e9)
+    para.canv = _RectRecorder()
+    para._draw_line(para._lines[0], 0.0)
+    assert len(para.canv.rects) == 2
+
+
 def _three_pages() -> str:
     return "\n\n".join(f"段落{i}。" + "本文" * 300 for i in range(6)) + "\n"
 

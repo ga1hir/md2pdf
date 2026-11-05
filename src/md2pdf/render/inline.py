@@ -406,24 +406,42 @@ class JParagraph(Flowable):
         else:
             x = 0.0
 
+        # 原子の x 位置と後ろの字間。背景を先に描くため、文字より前に求めておく
+        xs: list[float] = []
+        gaps: list[float] = []
         for idx, atom in enumerate(atoms):
             gap = extra if idx < n_body - 1 else 0.0  # ぶら下げ句読点の前には字間を入れない
-            run = atom.run
-            size = run.size * (0.7 if run.sup else 1.0)
-            y = baseline + (run.size * 0.34 if run.sup else 0.0)
+            xs.append(x)
+            gaps.append(gap)
+            x += atom.width + gap
 
-            # インラインコード背景・枠
-            if run.bg is not None and atom.kind != "space":
+        # インラインコード背景・枠: 同じラン（1 つのインラインコード）の続く原子を 1 つの枠で描く。
+        # 空白・字間も枠に含める。行をまたぐコードは行ごとに 1 つの枠になる（GitHub #7）
+        i = 0
+        while i < n:
+            run = atoms[i].run
+            j = i
+            while j + 1 < n and atoms[j + 1].run is run:
+                j += 1
+            if run.bg is not None:
+                size = run.size * (0.7 if run.sup else 1.0)
                 pad = size * 0.12
                 c.setFillColor(run.bg)
+                stroke = 0
                 if run.border is not None:
                     c.setStrokeColor(run.border)
                     c.setLineWidth(0.5)
-                    c.roundRect(x - pad, baseline - size * 0.22, atom.width + 2 * pad,
-                                size * 1.18, 2, stroke=1, fill=1)
-                else:
-                    c.roundRect(x - pad, baseline - size * 0.22, atom.width + 2 * pad,
-                                size * 1.18, 2, stroke=0, fill=1)
+                    stroke = 1
+                c.roundRect(xs[i] - pad, baseline - size * 0.22,
+                            xs[j] + atoms[j].width - xs[i] + 2 * pad,
+                            size * 1.18, 2, stroke=stroke, fill=1)
+            i = j + 1
+
+        for idx, atom in enumerate(atoms):
+            x, gap = xs[idx], gaps[idx]
+            run = atom.run
+            size = run.size * (0.7 if run.sup else 1.0)
+            y = baseline + (run.size * 0.34 if run.sup else 0.0)
 
             if atom.kind == "image" and run.image:
                 path, iw, ih = run.image
@@ -459,5 +477,3 @@ class JParagraph(Flowable):
             if run.link and atom.text:
                 c.linkURL(run.link, (x, baseline - 2, x + atom.width, baseline + size),
                           relative=0, thickness=0)
-
-            x += atom.width + gap
